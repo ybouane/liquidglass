@@ -65,25 +65,6 @@ body { overflow: hidden; background: #000; font-family: -apple-system, BlinkMacS
 
 .sep { height: 1px; background: rgba(255,255,255,0.07); margin: 14px 0; }
 
-.toggle-group { display: flex; gap: 4px; margin-top: 4px; }
-.toggle-group button {
-    flex: 1;
-    padding: 5px 4px;
-    background: rgba(255,255,255,0.06);
-    border: 1px solid rgba(255,255,255,0.10);
-    border-radius: 5px;
-    color: #888;
-    font-size: 10px;
-    cursor: pointer;
-    transition: all 0.15s;
-}
-.toggle-group button:hover { background: rgba(255,255,255,0.10); color: #bbb; }
-.toggle-group button.active {
-    background: rgba(255,255,255,0.16);
-    border-color: rgba(255,255,255,0.25);
-    color: #fff;
-}
-
 #resetBtn {
     width: 100%;
     padding: 6px;
@@ -113,22 +94,22 @@ body { overflow: hidden; background: #000; font-family: -apple-system, BlinkMacS
 // ====================================================================
 const DEFAULTS = {
     blurAmount:      0.00,
-    frostAmount:     0.00,
-    refraction:      0.30,
-    chromAberration: 0.07,
-    edgeHighlight:   0.19,
+    frostAmount:     1.00,
+    refraction:      0.69,
+    chromAberration: 0.03,
+    edgeHighlight:   0.21,
     specular:        0.00,
     fresnel:         1.00,
     distortion:      0.00,
     cornerRadius:    65,
-    zRadius:         11,
+    zRadius:         40,
     opacity:         1.00,
     saturation:      0.00,
     tintStrength:    0.00,
     panelScale:      1.57,
-    bevelMode:       0,       // 0=pill, 1=straight, 2=rounded
-    shadowOpacity:   0.11,
-    shadowSpread:    3,
+    brightness:      0.00,
+    shadowOpacity:   0.15,
+    shadowSpread:    5,
     shadowOffsetY:   1,
 };
 const params = { ...DEFAULTS };
@@ -220,7 +201,8 @@ uniform float u_alpha;
 uniform float u_sat;
 uniform float u_tint;
 uniform float u_zRadius;
-uniform float u_bevelMode;    // 0=pill, 1=straight, 2=rounded
+float u_bevelMode = 0.0;
+uniform float u_brightness;
 uniform float u_shadowAlpha;
 uniform float u_shadowSpread;
 uniform float u_shadowOffY;
@@ -398,6 +380,9 @@ void main() {
     float frostVar = u_frost * (1.0 - edge * 0.15);
     vec3 col = mix(sharp, blur, frostVar);
 
+    // ---- Brightness ----
+    col *= 1.0 + u_brightness;
+
     // ---- Saturation ----
     float lum = dot(col, vec3(0.299, 0.587, 0.114));
     col = mix(vec3(lum), col, 1.0 + u_sat);
@@ -503,7 +488,7 @@ const glassU = uloc(glassP, [
     'u_bgTex','u_blurTex','u_center','u_size','u_radius','u_res','u_pad',
     'u_frost','u_refract','u_chroma','u_edgeHL','u_spec',
     'u_fresnel','u_distort','u_alpha','u_sat','u_tint',
-    'u_zRadius','u_bevelMode','u_shadowAlpha','u_shadowSpread','u_shadowOffY'
+    'u_zRadius','u_brightness','u_shadowAlpha','u_shadowSpread','u_shadowOffY'
 ]);
 
 // Geometry
@@ -689,6 +674,7 @@ const ctrlDefs = [
     ['saturation',      'Saturation',       -1, 1,   0.01],
     ['tintStrength',    'Tint Strength',     0, 1,   0.01],
     ['panelScale',      'Panel Scale',       0.3, 2, 0.01],
+    ['brightness',      'Brightness',       -0.5, 0.5, 0.01],
     ['shadowOpacity',   'Shadow Opacity',    0, 1,   0.01],
     ['shadowSpread',    'Shadow Spread',     1, 80,  1   ],
     ['shadowOffsetY',   'Shadow Offset Y',  -30, 50, 1   ],
@@ -713,33 +699,6 @@ ctrlDefs.forEach(([key, label, min, max, step]) => {
     sliders[key] = { inp, valEl, prec };
 });
 
-// Bevel mode toggle
-const bevelModes = ['Pill', 'Straight', 'Rounded'];
-const bevelDiv = document.createElement('div');
-bevelDiv.className = 'ctrl';
-bevelDiv.innerHTML = `<label><span>Bevel Shape</span></label><div class="toggle-group" id="bevelToggle"></div>`;
-// Insert after the Z Radius slider (find it in the controls list)
-const zRadiusCtrl = ctrlEl.children[9]; // zRadius is index 9 in ctrlDefs
-if (zRadiusCtrl && zRadiusCtrl.nextSibling) {
-    ctrlEl.insertBefore(bevelDiv, zRadiusCtrl.nextSibling);
-} else {
-    ctrlEl.appendChild(bevelDiv);
-}
-const bevelToggle = document.getElementById('bevelToggle');
-const bevelBtns = [];
-bevelModes.forEach((label, i) => {
-    const btn = document.createElement('button');
-    btn.textContent = label;
-    if (i === params.bevelMode) btn.classList.add('active');
-    btn.addEventListener('click', () => {
-        params.bevelMode = i;
-        bevelBtns.forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-    });
-    bevelToggle.appendChild(btn);
-    bevelBtns.push(btn);
-});
-
 document.getElementById('resetBtn').addEventListener('click', () => {
     Object.assign(params, DEFAULTS);
     for (const [key] of ctrlDefs) {
@@ -747,10 +706,6 @@ document.getElementById('resetBtn').addEventListener('click', () => {
         s.inp.value = params[key];
         s.valEl.textContent = params[key].toFixed(s.prec);
     }
-    // Reset bevel toggle
-    bevelBtns.forEach((b, i) => {
-        b.classList.toggle('active', i === params.bevelMode);
-    });
 });
 
 // ====================================================================
@@ -841,7 +796,7 @@ function render() {
     gl.uniform1f(glassU.u_sat,     params.saturation);
     gl.uniform1f(glassU.u_tint,    params.tintStrength);
     gl.uniform1f(glassU.u_zRadius, params.zRadius * dpr);
-    gl.uniform1f(glassU.u_bevelMode, params.bevelMode);
+    gl.uniform1f(glassU.u_brightness, params.brightness);
     gl.uniform1f(glassU.u_shadowAlpha,  params.shadowOpacity);
     gl.uniform1f(glassU.u_shadowSpread, params.shadowSpread * dpr);
     gl.uniform1f(glassU.u_shadowOffY,   params.shadowOffsetY * dpr);
