@@ -1,0 +1,739 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Liquid Glass</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { overflow: hidden; background: #000; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, sans-serif; }
+
+#glCanvas {
+    position: fixed;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+}
+
+#sidebar {
+    position: fixed;
+    top: 0; right: 0;
+    width: 260px; height: 100vh;
+    background: rgba(15, 15, 20, 0.88);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    padding: 20px 16px;
+    overflow-y: auto;
+    color: #bbb;
+    font-size: 11px;
+    z-index: 10;
+    border-left: 1px solid rgba(255,255,255,0.08);
+}
+#sidebar::-webkit-scrollbar { width: 4px; }
+#sidebar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 2px; }
+
+#sidebar h2 {
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 16px;
+    letter-spacing: 0.3px;
+}
+
+.ctrl { margin-bottom: 10px; }
+.ctrl label {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 3px;
+}
+.ctrl .val { color: #666; font-variant-numeric: tabular-nums; }
+
+.ctrl input[type="range"] {
+    width: 100%;
+    -webkit-appearance: none;
+    height: 3px;
+    background: rgba(255,255,255,0.12);
+    border-radius: 2px;
+    outline: none;
+}
+.ctrl input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 12px; height: 12px;
+    background: #fff;
+    border-radius: 50%;
+    cursor: pointer;
+}
+
+.sep { height: 1px; background: rgba(255,255,255,0.07); margin: 14px 0; }
+
+#resetBtn {
+    width: 100%;
+    padding: 6px;
+    margin-top: 8px;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 6px;
+    color: #aaa;
+    font-size: 11px;
+    cursor: pointer;
+}
+#resetBtn:hover { background: rgba(255,255,255,0.14); color: #fff; }
+</style>
+</head>
+<body>
+<canvas id="glCanvas"></canvas>
+<div id="sidebar">
+    <h2>Liquid Glass Controls</h2>
+    <div id="controls"></div>
+    <div class="sep"></div>
+    <button id="resetBtn">Reset Defaults</button>
+</div>
+
+<script>
+// ====================================================================
+// Default parameters
+// ====================================================================
+const DEFAULTS = {
+    blurAmount:      0.00,
+    frostAmount:     0.00,
+    refraction:      0.33,
+    chromAberration: 0.28,
+    edgeHighlight:   0.19,
+    specular:        0.00,
+    fresnel:         0.49,
+    distortion:      0.00,
+    cornerRadius:    22,
+    zRadius:         11,
+    opacity:         1.00,
+    saturation:      0.00,
+    tintStrength:    0.00,
+    panelScale:      1.0,
+    shadowOpacity:   0.02,
+    shadowSpread:    3,
+    shadowOffsetY:   1,
+};
+const params = { ...DEFAULTS };
+
+const BLUR_ITERATIONS = 6;
+const SHADOW_PAD = 60; // px extra around panel for shadow
+
+// ====================================================================
+// Shader sources
+// ====================================================================
+
+// --- Fullscreen quad vertex shader ---
+const VS_QUAD = `
+attribute vec2 a_pos;
+varying vec2 v_uv;
+void main() {
+    v_uv = a_pos * 0.5 + 0.5;
+    gl_Position = vec4(a_pos, 0.0, 1.0);
+}`;
+
+// --- Blit with UV transform ---
+const FS_BLIT = `
+precision mediump float;
+uniform sampler2D u_tex;
+uniform vec2 u_scale;
+uniform vec2 u_offset;
+varying vec2 v_uv;
+void main() {
+    gl_FragColor = texture2D(u_tex, v_uv * u_scale + u_offset);
+}`;
+
+// --- 9-tap Gaussian blur (single direction) ---
+const FS_BLUR = `
+precision mediump float;
+uniform sampler2D u_tex;
+uniform vec2 u_dir;
+varying vec2 v_uv;
+void main() {
+    vec4 s  = texture2D(u_tex, v_uv) * 0.227027;
+    s += texture2D(u_tex, v_uv + u_dir * 1.0) * 0.194594;
+    s += texture2D(u_tex, v_uv - u_dir * 1.0) * 0.194594;
+    s += texture2D(u_tex, v_uv + u_dir * 2.0) * 0.121622;
+    s += texture2D(u_tex, v_uv - u_dir * 2.0) * 0.121622;
+    s += texture2D(u_tex, v_uv + u_dir * 3.0) * 0.054054;
+    s += texture2D(u_tex, v_uv - u_dir * 3.0) * 0.054054;
+    s += texture2D(u_tex, v_uv + u_dir * 4.0) * 0.016216;
+    s += texture2D(u_tex, v_uv - u_dir * 4.0) * 0.016216;
+    gl_FragColor = s;
+}`;
+
+// --- Glass panel vertex shader ---
+const VS_GLASS = `
+attribute vec2 a_pos;
+uniform vec2 u_center;    // panel center, px (DOM coords, top-left origin)
+uniform vec2 u_size;      // panel size, px
+uniform vec2 u_res;       // viewport px
+uniform float u_pad;      // shadow padding px
+varying vec2 v_localPx;
+varying vec2 v_screenUV;
+
+void main() {
+    vec2 total = u_size + vec2(u_pad * 2.0);
+    v_localPx = a_pos * total;                       // px from panel center
+    vec2 px = u_center + a_pos * total;              // screen px (DOM)
+    v_screenUV = vec2(px.x / u_res.x, 1.0 - px.y / u_res.y);
+    vec2 ndc = (px / u_res) * 2.0 - 1.0;
+    ndc.y = -ndc.y;
+    gl_Position = vec4(ndc, 0.0, 1.0);
+}`;
+
+// --- Glass panel fragment shader (core liquid glass effect) ---
+const FS_GLASS = `
+precision highp float;
+
+uniform sampler2D u_bgTex;
+uniform sampler2D u_blurTex;
+uniform vec2 u_size;           // panel px
+uniform float u_radius;        // corner radius px
+uniform vec2 u_res;
+
+uniform float u_frost;
+uniform float u_refract;
+uniform float u_chroma;
+uniform float u_edgeHL;
+uniform float u_spec;
+uniform float u_fresnel;
+uniform float u_distort;
+uniform float u_alpha;
+uniform float u_sat;
+uniform float u_tint;
+uniform float u_zRadius;
+uniform float u_shadowAlpha;
+uniform float u_shadowSpread;
+uniform float u_shadowOffY;
+
+varying vec2 v_localPx;
+varying vec2 v_screenUV;
+
+// Rounded-rect signed distance
+float rrSDF(vec2 p, vec2 b, float r) {
+    vec2 q = abs(p) - b + vec2(r);
+    return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - r;
+}
+
+// Height field for pill cross-section: flat on top, circular ramp at edges
+// d = distance inside from edge (-sdf), zR = z-radius of the bevel
+// Returns height in [0, zR] and its derivative w.r.t. d
+float pillHeight(float d, float zR) {
+    if (d >= zR) return zR;  // flat plateau
+    if (d <= 0.0) return 0.0;
+    // Circular arc: h = sqrt(zR^2 - (zR - d)^2) = sqrt(d * (2*zR - d))
+    return sqrt(d * (2.0 * zR - d));
+}
+
+float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+void main() {
+    vec2 half_ = u_size * 0.5;
+    float r = min(u_radius, min(half_.x, half_.y));
+    float sdf = rrSDF(v_localPx, half_, r);
+
+    // ---- Shadow (outside panel, offset by shadowOffY) ----
+    if (sdf > 0.0) {
+        // Also compute SDF with offset for shadow displacement
+        float sdfShadow = rrSDF(v_localPx - vec2(0.0, u_shadowOffY), half_, r);
+        float d = max(sdfShadow - 1.0, 0.0);
+        float spread = max(u_shadowSpread, 1.0);
+        float falloff = 1.0 / (spread * spread);
+        // Soft outer shadow + tighter contact shadow
+        float outerShadow = exp(-d * d * falloff) * 0.65;
+        float contactShadow = exp(-d * 0.08 / max(spread * 0.04, 0.01)) * 0.35;
+        float shadow = (outerShadow + contactShadow) * u_shadowAlpha;
+        gl_FragColor = vec4(0.0, 0.0, 0.0, shadow);
+        return;
+    }
+
+    // ---- Anti-aliased mask ----
+    float mask = 1.0 - smoothstep(-1.5, 0.5, sdf);
+
+    float maxD = min(half_.x, half_.y);
+    float inside = -sdf; // distance inside from edge (positive inside)
+    float edge = smoothstep(maxD * 0.35, 0.0, inside);  // 1 at edge, 0 deep inside
+
+    // ---- Surface normal (pill/capsule cross-section) ----
+    // Compute height field from SDF: circular bevel within zRadius, flat beyond
+    float zR = u_zRadius;
+    float e = 2.0;
+    // Sample SDF at neighboring points to get height gradient
+    float dC = -sdf;
+    float dR = -rrSDF(v_localPx + vec2(e, 0.0), half_, r);
+    float dL = -rrSDF(v_localPx - vec2(e, 0.0), half_, r);
+    float dU = -rrSDF(v_localPx + vec2(0.0, e), half_, r);
+    float dD = -rrSDF(v_localPx - vec2(0.0, e), half_, r);
+    // Heights via pill profile
+    float hC = pillHeight(dC, zR);
+    float hR = pillHeight(dR, zR);
+    float hL = pillHeight(dL, zR);
+    float hU = pillHeight(dU, zR);
+    float hD = pillHeight(dD, zR);
+    // Central differences for gradient of height
+    vec2 hGrad = vec2(hR - hL, hU - hD) / (2.0 * e);
+    // Normal from height field: N = normalize(-dh/dx, -dh/dy, 1)
+    vec3 N = normalize(vec3(-hGrad, 1.0));
+
+    float depth = smoothstep(0.0, zR, inside); // 0 at edge, 1 on flat plateau
+
+    // ---- Refraction offset (lensing) ----
+    vec2 refr = N.xy * u_refract * 0.03;
+    // Lensing: subtle convex-lens shift toward center on plateau
+    vec2 centerDir = -v_localPx / max(maxD, 1.0);
+    refr += centerDir * u_refract * 0.004 * depth;
+
+    // ---- Micro-distortion noise ----
+    vec2 ns = v_localPx * 0.08;
+    vec2 micro = (vec2(hash(ns), hash(ns + vec2(37.0))) - 0.5) * u_distort * 0.004;
+
+    // ---- Chromatic aberration ----
+    float caS = u_chroma * 0.018 * (edge * 0.7 + 0.3);
+    vec2 caD = N.xy * caS;
+    vec2 base = v_screenUV + refr + micro;
+
+    // Sample R/G/B at offset UVs for chromatic separation
+    vec3 sharp = vec3(
+        texture2D(u_bgTex,  base + caD).r,
+        texture2D(u_bgTex,  base).g,
+        texture2D(u_bgTex,  base - caD).b
+    );
+    vec3 blur = vec3(
+        texture2D(u_blurTex, base + caD).r,
+        texture2D(u_blurTex, base).g,
+        texture2D(u_blurTex, base - caD).b
+    );
+
+    // ---- Frosting mix (more frost at center, sharper at edges for depth) ----
+    float frostVar = u_frost * (1.0 - edge * 0.15);
+    vec3 col = mix(sharp, blur, frostVar);
+
+    // ---- Saturation ----
+    float lum = dot(col, vec3(0.299, 0.587, 0.114));
+    col = mix(vec3(lum), col, 1.0 + u_sat);
+
+    // ---- Cool glass tint ----
+    col = mix(col, col * vec3(0.92, 0.95, 1.05), u_tint);
+
+    // Light-gathering boost at center (convex lens effect)
+    col *= 1.0 + 0.06 * depth;
+
+    // ---- Fresnel ----
+    float fres = pow(1.0 - abs(N.z), 4.0) * u_fresnel;
+
+    // ---- Specular highlights (multi-light Blinn-Phong) ----
+    vec3 V = vec3(0.0, 0.0, 1.0);
+
+    // Key light (top-right, bright)
+    vec3 L1 = normalize(vec3(0.4, 0.7, 1.0));
+    vec3 H1 = normalize(L1 + V);
+    float sp1 = pow(max(dot(N, H1), 0.0), 90.0);
+
+    // Fill light (bottom-left, dimmer)
+    vec3 L2 = normalize(vec3(-0.3, -0.5, 1.0));
+    vec3 H2 = normalize(L2 + V);
+    float sp2 = pow(max(dot(N, H2), 0.0), 50.0) * 0.3;
+
+    // Broad diffuse spec (soft sheen)
+    vec3 L3 = normalize(vec3(0.1, 0.3, 1.0));
+    float spB = pow(max(dot(N, L3), 0.0), 6.0) * 0.1;
+
+    // Top-edge glint (like an overhead light source catching the bevel)
+    vec3 L4 = normalize(vec3(0.0, 0.9, 0.4));
+    vec3 H4 = normalize(L4 + V);
+    float sp4 = pow(max(dot(N, H4), 0.0), 120.0) * 0.6;
+
+    float totalSpec = (sp1 + sp2 + spB + sp4) * u_spec;
+
+    // ---- Inner border / stroke highlight ----
+    // Thin bright line at the very edge of the panel (like Apple's inner stroke)
+    float borderWidth = 1.5;
+    float innerStroke = smoothstep(-borderWidth - 1.0, -borderWidth, sdf)
+                      * (1.0 - smoothstep(-1.0, 0.0, sdf));
+    // Brighter on top edge, dimmer on bottom (directional light)
+    float topBias = 0.5 + 0.5 * (-v_localPx.y / half_.y);
+    innerStroke *= (0.4 + 0.6 * topBias);
+
+    // ---- Edge highlight & inner glow ----
+    float rim = edge * u_edgeHL * 0.22;
+    float innerGlow = smoothstep(5.0, 0.0, -sdf) * u_edgeHL * 0.15;
+
+    // ---- Environment-like reflection (fake) ----
+    // Subtle gradient based on normal direction to simulate environment
+    float envRefl = (N.y * 0.5 + 0.5) * fres * 0.08;
+
+    // ---- Composite ----
+    vec3 fin = col;
+    fin += vec3(totalSpec);
+    fin += vec3(rim + innerGlow);
+    fin += vec3(innerStroke * u_edgeHL * 0.55);
+    fin += vec3(envRefl);
+    fin = mix(fin, vec3(1.0), fres * 0.2);
+
+    gl_FragColor = vec4(fin, mask * u_alpha);
+}`;
+
+// ====================================================================
+// WebGL bootstrap
+// ====================================================================
+const canvas = document.getElementById('glCanvas');
+const gl = canvas.getContext('webgl', { alpha: false, antialias: false, premultipliedAlpha: false });
+if (!gl) { document.body.innerHTML = '<h1 style="color:#fff;padding:40px">WebGL not supported</h1>'; throw 0; }
+
+function compile(src, type) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) { console.error(gl.getShaderInfoLog(s), src); return null; }
+    return s;
+}
+function link(vs, fs) {
+    const p = gl.createProgram();
+    gl.attachShader(p, compile(vs, gl.VERTEX_SHADER));
+    gl.attachShader(p, compile(fs, gl.FRAGMENT_SHADER));
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) { console.error(gl.getProgramInfoLog(p)); return null; }
+    return p;
+}
+function uloc(prog, names) {
+    const u = {};
+    for (const n of names) u[n] = gl.getUniformLocation(prog, n);
+    return u;
+}
+
+// Programs
+const blitP = link(VS_QUAD, FS_BLIT);
+const blitU = uloc(blitP, ['u_tex','u_scale','u_offset']);
+
+const blurP = link(VS_QUAD, FS_BLUR);
+const blurU = uloc(blurP, ['u_tex','u_dir']);
+
+const glassP = link(VS_GLASS, FS_GLASS);
+const glassU = uloc(glassP, [
+    'u_bgTex','u_blurTex','u_center','u_size','u_radius','u_res','u_pad',
+    'u_frost','u_refract','u_chroma','u_edgeHL','u_spec',
+    'u_fresnel','u_distort','u_alpha','u_sat','u_tint',
+    'u_zRadius','u_shadowAlpha','u_shadowSpread','u_shadowOffY'
+]);
+
+// Geometry
+const quadBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+
+const panelBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, panelBuf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-.5,-.5, .5,-.5, -.5,.5, .5,.5]), gl.STATIC_DRAW);
+
+function drawQuad(prog, buf) {
+    const loc = gl.getAttribLocation(prog, 'a_pos');
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+
+// ====================================================================
+// FBO management
+// ====================================================================
+function makeFBO(w, h) {
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return { fbo, tex, w, h };
+}
+function freeFBO(f) { if (f) { gl.deleteFramebuffer(f.fbo); gl.deleteTexture(f.tex); } }
+
+let bgFBO, blurA, blurB;
+function initFBOs(w, h) {
+    freeFBO(bgFBO); freeFBO(blurA); freeFBO(blurB);
+    const hw = Math.floor(w/2), hh = Math.floor(h/2);
+    bgFBO = makeFBO(w, h);
+    blurA = makeFBO(hw, hh);
+    blurB = makeFBO(hw, hh);
+}
+
+// ====================================================================
+// Background image
+// ====================================================================
+let bgTex = null, bgW = 1, bgH = 1, bgReady = false;
+const bgImg = new Image();
+bgImg.onload = () => {
+    bgW = bgImg.naturalWidth; bgH = bgImg.naturalHeight;
+    bgTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, bgTex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bgImg);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    bgReady = true;
+};
+bgImg.src = 'background2.png';
+
+// Cover-mode UV transform
+function bgTransform(vw, vh) {
+    const ia = bgW / bgH, va = vw / vh;
+    if (va > ia) {
+        const s = ia / va;
+        return [1, s, 0, (1 - s) / 2];
+    }
+    const s = va / ia;
+    return [s, 1, (1 - s) / 2, 0];
+}
+
+// ====================================================================
+// Panels
+// ====================================================================
+const SIDEBAR_W = 260;
+const CANVAS_ASPECT = 1206 / 2622; // width / height
+const panels = [
+    { x: 0, y: 0, w: 380, h: 260 },
+    { x: 0, y: 0, w: 300, h: 380 },
+];
+function canvasCSS() {
+    return { w: parseFloat(canvas.style.width), h: parseFloat(canvas.style.height) };
+}
+function layoutPanels() {
+    const { w, h } = canvasCSS();
+    panels[0].x = w * 0.32; panels[0].y = h * 0.35;
+    panels[1].x = w * 0.62; panels[1].y = h * 0.55;
+}
+// Convert page mouse coords to canvas-local coords
+function toLocal(ex, ey) {
+    const r = canvas.getBoundingClientRect();
+    return { x: ex - r.left, y: ey - r.top };
+}
+
+// ====================================================================
+// Mouse interaction
+// ====================================================================
+let drag = -1, dx = 0, dy = 0;
+
+function hitTest(mx, my) {
+    const s = params.panelScale;
+    for (let i = panels.length - 1; i >= 0; i--) {
+        const p = panels[i];
+        if (Math.abs(mx - p.x) < p.w * s / 2 && Math.abs(my - p.y) < p.h * s / 2) return i;
+    }
+    return -1;
+}
+
+canvas.addEventListener('mousedown', e => {
+    const m = toLocal(e.clientX, e.clientY);
+    const i = hitTest(m.x, m.y);
+    if (i < 0) return;
+    drag = i; dx = m.x - panels[i].x; dy = m.y - panels[i].y;
+    // bring to front
+    if (i < panels.length - 1) {
+        const p = panels.splice(i, 1)[0];
+        panels.push(p);
+        drag = panels.length - 1;
+    }
+    canvas.style.cursor = 'grabbing';
+});
+window.addEventListener('mousemove', e => {
+    const m = toLocal(e.clientX, e.clientY);
+    if (drag >= 0) {
+        panels[drag].x = m.x - dx;
+        panels[drag].y = m.y - dy;
+    } else {
+        canvas.style.cursor = hitTest(m.x, m.y) >= 0 ? 'grab' : 'default';
+    }
+});
+window.addEventListener('mouseup', () => { drag = -1; canvas.style.cursor = 'default'; });
+
+// ====================================================================
+// Resize
+// ====================================================================
+function resize() {
+    const dpr = devicePixelRatio || 1;
+    const availW = innerWidth - SIDEBAR_W;
+    const availH = innerHeight;
+    // Fit 1206×2622 aspect ratio within available space
+    let cw, ch;
+    if (availW / availH > CANVAS_ASPECT) {
+        ch = availH;
+        cw = ch * CANVAS_ASPECT;
+    } else {
+        cw = availW;
+        ch = cw / CANVAS_ASPECT;
+    }
+    canvas.width = Math.round(cw * dpr);
+    canvas.height = Math.round(ch * dpr);
+    canvas.style.width = Math.round(cw) + 'px';
+    canvas.style.height = Math.round(ch) + 'px';
+    // Offset left to account for sidebar
+    canvas.style.left = 'calc(50% - ' + (SIDEBAR_W / 2) + 'px)';
+    initFBOs(canvas.width, canvas.height);
+}
+addEventListener('resize', () => { resize(); layoutPanels(); });
+resize();
+layoutPanels();
+
+// ====================================================================
+// Sidebar UI
+// ====================================================================
+const ctrlDefs = [
+    ['blurAmount',      'Blur Amount',       0, 1,   0.01],
+    ['frostAmount',     'Frost Amount',      0, 1,   0.01],
+    ['refraction',      'Refraction',        0, 1,   0.01],
+    ['chromAberration', 'Chromatic Aberr.',   0, 1,   0.01],
+    ['edgeHighlight',   'Edge Highlight',    0, 1,   0.01],
+    ['specular',        'Specular',          0, 1,   0.01],
+    ['fresnel',         'Fresnel',           0, 1,   0.01],
+    ['distortion',      'Distortion/Noise',  0, 1,   0.01],
+    ['cornerRadius',    'Corner Radius',     0, 100, 1   ],
+    ['zRadius',         'Z Radius (Bevel)',  1, 120, 1   ],
+    ['opacity',         'Opacity',           0, 1,   0.01],
+    ['saturation',      'Saturation',       -1, 1,   0.01],
+    ['tintStrength',    'Tint Strength',     0, 1,   0.01],
+    ['panelScale',      'Panel Scale',       0.3, 2, 0.01],
+    ['shadowOpacity',   'Shadow Opacity',    0, 1,   0.01],
+    ['shadowSpread',    'Shadow Spread',     1, 80,  1   ],
+    ['shadowOffsetY',   'Shadow Offset Y',  -30, 50, 1   ],
+];
+
+const sliders = {};
+const ctrlEl = document.getElementById('controls');
+
+ctrlDefs.forEach(([key, label, min, max, step]) => {
+    const div = document.createElement('div');
+    div.className = 'ctrl';
+    const prec = step < 1 ? 2 : 0;
+    div.innerHTML = `<label><span>${label}</span><span class="val">${params[key].toFixed(prec)}</span></label>
+        <input type="range" min="${min}" max="${max}" step="${step}" value="${params[key]}">`;
+    ctrlEl.appendChild(div);
+    const inp = div.querySelector('input');
+    const valEl = div.querySelector('.val');
+    inp.addEventListener('input', () => {
+        params[key] = parseFloat(inp.value);
+        valEl.textContent = params[key].toFixed(prec);
+    });
+    sliders[key] = { inp, valEl, prec };
+});
+
+document.getElementById('resetBtn').addEventListener('click', () => {
+    Object.assign(params, DEFAULTS);
+    for (const [key] of ctrlDefs) {
+        const s = sliders[key];
+        s.inp.value = params[key];
+        s.valEl.textContent = params[key].toFixed(s.prec);
+    }
+});
+
+// ====================================================================
+// Render loop
+// ====================================================================
+function render() {
+    requestAnimationFrame(render);
+    if (!bgReady) return;
+
+    const W = canvas.width, H = canvas.height;
+    const dpr = devicePixelRatio || 1;
+    const hw = blurA.w, hh = blurA.h;
+    const bt = bgTransform(W, H);
+
+    // --- Pass 1: background → FBO (with cover transform) ---
+    gl.bindFramebuffer(gl.FRAMEBUFFER, bgFBO.fbo);
+    gl.viewport(0, 0, W, H);
+    gl.useProgram(blitP);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, bgTex);
+    gl.uniform1i(blitU.u_tex, 0);
+    gl.uniform2f(blitU.u_scale, bt[0], bt[1]);
+    gl.uniform2f(blitU.u_offset, bt[2], bt[3]);
+    drawQuad(blitP, quadBuf);
+
+    // --- Pass 2: downsample bgFBO → blurA ---
+    gl.bindFramebuffer(gl.FRAMEBUFFER, blurA.fbo);
+    gl.viewport(0, 0, hw, hh);
+    gl.bindTexture(gl.TEXTURE_2D, bgFBO.tex);
+    gl.uniform2f(blitU.u_scale, 1, 1);
+    gl.uniform2f(blitU.u_offset, 0, 0);
+    drawQuad(blitP, quadBuf);
+
+    // --- Pass 3: multi-pass Gaussian blur ---
+    const spread = params.blurAmount * 2.5;
+    gl.useProgram(blurP);
+    gl.uniform1i(blurU.u_tex, 0);
+    for (let i = 0; i < BLUR_ITERATIONS; i++) {
+        // H-blur: A → B
+        gl.bindFramebuffer(gl.FRAMEBUFFER, blurB.fbo);
+        gl.viewport(0, 0, hw, hh);
+        gl.bindTexture(gl.TEXTURE_2D, blurA.tex);
+        gl.uniform2f(blurU.u_dir, spread / hw, 0);
+        drawQuad(blurP, quadBuf);
+        // V-blur: B → A
+        gl.bindFramebuffer(gl.FRAMEBUFFER, blurA.fbo);
+        gl.bindTexture(gl.TEXTURE_2D, blurB.tex);
+        gl.uniform2f(blurU.u_dir, 0, spread / hh);
+        drawQuad(blurP, quadBuf);
+    }
+
+    // --- Pass 4: composite to screen ---
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, W, H);
+
+    // Background
+    gl.useProgram(blitP);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, bgFBO.tex);
+    gl.uniform1i(blitU.u_tex, 0);
+    gl.uniform2f(blitU.u_scale, 1, 1);
+    gl.uniform2f(blitU.u_offset, 0, 0);
+    drawQuad(blitP, quadBuf);
+
+    // Glass panels
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(glassP);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, bgFBO.tex);
+    gl.uniform1i(glassU.u_bgTex, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, blurA.tex);
+    gl.uniform1i(glassU.u_blurTex, 1);
+
+    gl.uniform2f(glassU.u_res, W, H);
+    gl.uniform1f(glassU.u_radius, params.cornerRadius * dpr);
+    gl.uniform1f(glassU.u_pad, SHADOW_PAD * dpr);
+    gl.uniform1f(glassU.u_frost,   params.frostAmount);
+    gl.uniform1f(glassU.u_refract, params.refraction);
+    gl.uniform1f(glassU.u_chroma,  params.chromAberration);
+    gl.uniform1f(glassU.u_edgeHL,  params.edgeHighlight);
+    gl.uniform1f(glassU.u_spec,    params.specular);
+    gl.uniform1f(glassU.u_fresnel, params.fresnel);
+    gl.uniform1f(glassU.u_distort, params.distortion);
+    gl.uniform1f(glassU.u_alpha,   params.opacity);
+    gl.uniform1f(glassU.u_sat,     params.saturation);
+    gl.uniform1f(glassU.u_tint,    params.tintStrength);
+    gl.uniform1f(glassU.u_zRadius, params.zRadius * dpr);
+    gl.uniform1f(glassU.u_shadowAlpha,  params.shadowOpacity);
+    gl.uniform1f(glassU.u_shadowSpread, params.shadowSpread * dpr);
+    gl.uniform1f(glassU.u_shadowOffY,   params.shadowOffsetY * dpr);
+
+    const sc = params.panelScale;
+    for (const p of panels) {
+        gl.uniform2f(glassU.u_center, p.x * dpr, p.y * dpr);
+        gl.uniform2f(glassU.u_size, p.w * sc * dpr, p.h * sc * dpr);
+        drawQuad(glassP, panelBuf);
+    }
+
+    gl.disable(gl.BLEND);
+}
+requestAnimationFrame(render);
+</script>
+</body>
+</html>
