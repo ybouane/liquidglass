@@ -137,6 +137,20 @@
 		font-size: 0.85em;
 		z-index: 10;
 	}
+	.fps-counter {
+		position: absolute;
+		top: 20px;
+		left: 20px;
+		background: rgba(0, 0, 0, 0.5);
+		backdrop-filter: blur(6px);
+		-webkit-backdrop-filter: blur(6px);
+		padding: 6px 14px;
+		border-radius: 16px;
+		color: #0f0;
+		font-size: 0.85em;
+		font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+		z-index: 10;
+	}
 </style>
 </head>
 <body>
@@ -170,6 +184,7 @@
 
 	<!-- Non-glass overlay ABOVE glass (tests stacking) -->
 	<div class="overlay-badge">Library Demo</div>
+	<div class="fps-counter" id="fps-counter">-- FPS</div>
 </div>
 
 <script>
@@ -261,6 +276,12 @@
 		root: document.querySelector('#liquid-glass-root'),
 		glassElements: glassElements,
 	});
+
+	// FPS display
+	const fpsEl = document.getElementById('fps-counter');
+	setInterval(() => {
+		fpsEl.textContent = instance.fps + ' FPS';
+	}, 500);
 
 	// The instance can be destroyed later with:
 	// instance.destroy();
