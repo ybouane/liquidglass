@@ -46,13 +46,14 @@ body {
 #hero-root {
 	position: relative;
 	display: grid;
-	grid-template-columns: 1fr 1fr;
+	grid-template-columns: repeat(6, 1fr);
+	grid-template-rows: auto auto auto minmax(260px, auto) auto;
 	grid-template-areas:
-		"title     title"
-		"buttons   buttons"
-		"video     magnifier"
-		"panels    panels"
-		"icons     icons";
+		"title  title  title  title  title  title"
+		".      btn-l  btn-l  btn-r  btn-r  ."
+		"video  video  video  mag    mag    mag"
+		"fp-l   fp-l   fp-c   fp-c   fp-r   fp-r"
+		"tabs   tabs   tabs   tabs   tabs   tabs";
 	gap: 20px;
 	padding: 48px clamp(24px, 5vw, 80px) 60px;
 	min-height: 100vh;
@@ -93,23 +94,17 @@ body {
 		}
 	}
 
-	.hero-buttons-bar {
-		grid-area: buttons;
-		display: flex;
-		justify-content: center;
-		gap: 16px;
-		z-index: 2;
-	}
-
 	.hero-btn {
 		display: inline-flex;
 		align-items: center;
+		align-self: center;
 		padding: 14px 28px;
 		color: #fff;
 		text-decoration: none;
 		font-weight: 600;
 		font-size: 1em;
 		white-space: nowrap;
+		z-index: 2;
 
 		.label {
 			position: relative;
@@ -127,6 +122,8 @@ body {
 			}
 		}
 	}
+	#glass-btn-1 { grid-area: btn-l; justify-self: end; }
+	#glass-btn-2 { grid-area: btn-r; justify-self: start; }
 
 	.hero-video-wrap {
 		grid-area: video;
@@ -203,7 +200,7 @@ body {
 	}
 
 	.hero-mag-wrap {
-		grid-area: magnifier;
+		grid-area: mag;
 		position: relative;
 		border-radius: 16px;
 		background: rgba(255,255,255,0.93);
@@ -232,17 +229,8 @@ body {
 		z-index: 3;
 	}
 
-	.hero-panels-wrap {
-		grid-area: panels;
-		position: relative;
-		border-radius: 20px;
-		overflow: hidden;
-		min-height: 260px;
-		z-index: 1;
-	}
-
 	.float-panel {
-		position: absolute;
+		align-self: center;
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -259,27 +247,27 @@ body {
 			text-shadow: 0 1px 4px rgba(0,0,0,0.3);
 		}
 	}
-	.fp-1 { top: 50%; left: 60px; transform: translateY(-50%); }
-	.fp-2 { top: 50%; left: 50%; transform: translate(-50%, -50%); }
-	.fp-3 { top: 50%; right: 60px; transform: translateY(-50%); }
+	#glass-fp1 { grid-area: fp-l; justify-self: center; }
+	#glass-fp2 { grid-area: fp-c; justify-self: center; }
+	#glass-fp3 { grid-area: fp-r; justify-self: center; }
 
-	.hero-icons {
-		grid-area: icons;
-		position: relative;
+	.hero-tabs {
+		grid-area: tabs;
 		align-self: end;
 		justify-self: center;
-		display: flex;
-		gap: 40px;
-		padding: 16px 40px;
+		display: grid;
+		grid-template-columns: repeat(3, 1fr);
+		align-items: center;
+		justify-items: center;
 		border-radius: 20px;
 		background: rgba(255,255,255,0.08);
 		backdrop-filter: blur(10px);
 		z-index: 4;
-		white-space: nowrap;
 		margin-bottom: 16px;
 
 		.material-symbols-outlined {
 			font-size: 40px;
+			padding: 16px 30px;
 			color: #fff;
 			filter: drop-shadow(0 2px 6px rgba(0,0,0,0.3));
 			cursor: pointer;
@@ -287,19 +275,19 @@ body {
 
 			&:hover { opacity: 0.85; }
 		}
+	}
 
-		#glass-icon-indicator {
-			position: absolute;
-			top: 0;
-			left: 0;
-			height: 100%;
-			aspect-ratio: 1 / 1;
-			z-index: 5;
-			pointer-events: none;
-			transform: translate(-9999px, 0);
-			transition: transform 0.45s cubic-bezier(0.65, 0, 0.35, 1);
-			will-change: transform;
-		}
+	#glass-tab-indicator {
+		position: absolute;
+		top: 0;
+		left: 0;
+		width: 0;
+		height: 0;
+		z-index: 5;
+		pointer-events: none;
+		transform: translate(-9999px, -9999px);
+		transition: transform 0.45s cubic-bezier(0.65, 0, 0.35, 1);
+		will-change: transform;
 	}
 
 	.hero-fps {
@@ -571,12 +559,22 @@ code[class*="language-"] {
 @media (max-width: 700px) {
 	#hero-root {
 		grid-template-columns: 1fr;
+		grid-template-rows: repeat(9, auto);
 		grid-template-areas:
 			"title"
-			"buttons"
+			"btn-l"
+			"btn-r"
 			"video"
-			"magnifier"
-			"panels";
+			"mag"
+			"fp-l"
+			"fp-c"
+			"fp-r"
+			"tabs";
+
+		#glass-btn-1, #glass-btn-2,
+		#glass-fp1, #glass-fp2, #glass-fp3 {
+			justify-self: center;
+		}
 	}
 	.playground {
 		grid-template-columns: 1fr;
@@ -587,11 +585,11 @@ code[class*="language-"] {
 <body>
 
 <!-- ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     HERO — uses several LiquidGlass roots:
-       #hero-root         (buttons + floating panels)
+     HERO — three LiquidGlass roots:
+       #hero-root         (buttons, floating panels, tab indicator)
        #video-root        (video controls overlay)
        #magnifier-root    (dome magnifier)
-       #hero-icons-root   (icon indicator pill)
+     All glass elements are direct children of their root.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ -->
 <div id="hero-root">
 
@@ -604,24 +602,22 @@ code[class*="language-"] {
 		<p class="subtitle">Realistic WebGL glass effects for any HTML element</p>
 	</div>
 
-	<!-- Buttons bar (non-glass wrapper — for grid positioning) -->
-	<div class="hero-buttons-bar">
-		<a href="https://github.com/niclas-nicey/LiquidGlass" target="_blank" class="hero-btn" id="glass-btn-1">
-			<span class="label">
-				<svg viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.387.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.387-1.333-1.756-1.333-1.756-1.09-.745.083-.73.083-.73 1.205.085 1.84 1.237 1.84 1.237 1.07 1.834 2.806 1.304 3.49.997.108-.775.42-1.305.763-1.605-2.665-.3-5.467-1.332-5.467-5.93 0-1.31.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.3 1.23A11.5 11.5 0 0112 5.803c1.02.005 2.047.138 3.006.404 2.29-1.552 3.297-1.23 3.297-1.23.653 1.652.242 2.873.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.625-5.479 5.921.43.372.823 1.102.823 2.222 0 1.606-.015 2.896-.015 3.293 0 .322.216.694.825.576C20.565 21.795 24 17.298 24 12c0-6.63-5.37-12-12-12z"/></svg>
-				View on GitHub
-			</span>
-		</a>
-		<a href="https://x.com/ybouane" target="_blank" class="hero-btn" id="glass-btn-2">
-			<span class="label">
-				<svg viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
-				@ybouane
-			</span>
-		</a>
-	</div>
+	<!-- Buttons (direct children of root, placed via grid-area) -->
+	<a href="https://github.com/niclas-nicey/LiquidGlass" target="_blank" class="hero-btn" id="glass-btn-1">
+		<span class="label">
+			<svg viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.387.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.387-1.333-1.756-1.333-1.756-1.09-.745.083-.73.083-.73 1.205.085 1.84 1.237 1.84 1.237 1.07 1.834 2.806 1.304 3.49.997.108-.775.42-1.305.763-1.605-2.665-.3-5.467-1.332-5.467-5.93 0-1.31.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.3 1.23A11.5 11.5 0 0112 5.803c1.02.005 2.047.138 3.006.404 2.29-1.552 3.297-1.23 3.297-1.23.653 1.652.242 2.873.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.625-5.479 5.921.43.372.823 1.102.823 2.222 0 1.606-.015 2.896-.015 3.293 0 .322.216.694.825.576C20.565 21.795 24 17.298 24 12c0-6.63-5.37-12-12-12z"/></svg>
+			View on GitHub
+		</span>
+	</a>
+	<a href="https://x.com/ybouane" target="_blank" class="hero-btn" id="glass-btn-2">
+		<span class="label">
+			<svg viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+			@ybouane
+		</span>
+	</a>
 
 	<!-- Video wrap — its own LiquidGlass root for the controls overlay -->
-	<div class="hero-video-wrap" id="video-root">
+	<div class="hero-video-wrap" id="video-root" data-dynamic>
 		<video id="hero-video" src="video.mp4" autoplay muted loop playsinline data-dynamic></video>
 		<div class="glass-video-ctrl" id="glass-video-ctrl">
 			<span class="label">
@@ -631,26 +627,26 @@ code[class*="language-"] {
 		</div>
 	</div>
 
-	<!-- Magnifier wrap (non-glass, holds text + magnifier dome) -->
-	<div class="hero-mag-wrap" id="magnifier-root">
+	<!-- Magnifier wrap — its own LiquidGlass root for the dome -->
+	<div class="hero-mag-wrap" id="magnifier-root" data-dynamic>
 		<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt.</p>
 		<div class="hero-magnifier" id="glass-magnifier"></div>
 	</div>
 
-	<!-- Floating panels background strip -->
-	<div class="hero-panels-wrap">
-		<div class="float-panel fp-1" id="glass-fp1"><span class="label">Regular Glass</span></div>
-		<div class="float-panel fp-2" id="glass-fp2"><span class="label">Frosted Glass</span></div>
-		<div class="float-panel fp-3" id="glass-fp3"><span class="label">Dark Glass</span></div>
-	</div>
+	<!-- Floating glass panels (direct children of root, draggable) -->
+	<div class="float-panel" id="glass-fp1"><span class="label">Regular Glass</span></div>
+	<div class="float-panel" id="glass-fp2"><span class="label">Frosted Glass</span></div>
+	<div class="float-panel" id="glass-fp3"><span class="label">Dark Glass</span></div>
 
-	<!-- Icons overlay — its own LiquidGlass root so the indicator can live inside it -->
-	<div class="hero-icons" id="hero-icons-root">
+	<!-- Tabs container (non-glass, holds the icons) -->
+	<div class="hero-tabs">
 		<span class="material-symbols-outlined" data-bg="1">light_mode</span>
 		<span class="material-symbols-outlined" data-bg="2">dark_mode</span>
 		<span class="material-symbols-outlined" data-bg="3">volume_up</span>
-		<div id="glass-icon-indicator"></div>
 	</div>
+
+	<!-- Tab indicator glass — direct child of root, sized + positioned via JS -->
+	<div id="glass-tab-indicator"></div>
 
 	<!-- FPS -->
 	<div class="hero-fps" id="hero-fps">-- FPS</div>
@@ -850,8 +846,8 @@ document.getElementById('glass-video-ctrl').dataset.config = JSON.stringify({
 });
 document.getElementById('glass-magnifier').dataset.config = JSON.stringify({
 	bevelMode: 1,
-	cornerRadius: 15,
-	zRadius: 15,
+	cornerRadius: 30,
+	zRadius: 30,
 	floating: true,
 	blurAmount: 0,
 	frostAmount: 0,
@@ -876,57 +872,38 @@ document.getElementById('glass-fp3').dataset.config = JSON.stringify({
 	brightness: -0.3,
 	frostAmount: 0.95,
 });
-document.getElementById('glass-icon-indicator').dataset.config = JSON.stringify({
-	cornerRadius: 4,
-	zRadius: 4,
+document.getElementById('glass-tab-indicator').dataset.config = JSON.stringify({
+	cornerRadius: 16,
+	zRadius: 16,
 	blurAmount: 0,
 	frostAmount: 0.4,
 	edgeHighlight: 0.2,
 	shadowOpacity: 0.25,
 });
 
-// Hero root — only direct-child glass elements live here.
+// Wait for icon font so .hero-tabs has its final size before init.
+if (document.fonts && document.fonts.ready) {
+	await document.fonts.ready;
+}
+
+// Pre-size the tab indicator so the library allocates the right canvas
+// dimensions on first init.
+{
+	const tabs = document.querySelector('.hero-tabs');
+	const indicator = document.getElementById('glass-tab-indicator');
+	const tabsRect = tabs.getBoundingClientRect();
+	const slotW = tabsRect.width / tabs.children.length;
+	indicator.style.width = slotW + 'px';
+	indicator.style.height = tabsRect.height + 'px';
+}
+
+// Hero root — every glass element here is a direct child of #hero-root.
 const heroInstance = await LiquidGlass.init({
 	root: document.getElementById('hero-root'),
 	glassElements: document.querySelectorAll(
-		'#glass-btn-1, #glass-btn-2, #glass-fp1, #glass-fp2, #glass-fp3'
+		'#glass-btn-1, #glass-btn-2, #glass-fp1, #glass-fp2, #glass-fp3, #glass-tab-indicator'
 	),
 });
-
-// Icons bar — own root so the indicator pill can be a direct child of it.
-await LiquidGlass.init({
-	root: document.getElementById('hero-icons-root'),
-	glassElements: [document.getElementById('glass-icon-indicator')],
-});
-
-// ─── Icon switcher: clicking an icon swaps the background image
-//     and slides the glass indicator pill above it ───
-{
-	const heroBg = document.querySelector('.hero-bg');
-	const iconsRoot = document.getElementById('hero-icons-root');
-	const indicator = document.getElementById('glass-icon-indicator');
-	const icons = iconsRoot.querySelectorAll('.material-symbols-outlined');
-
-	function moveIndicator(iconEl) {
-		const rootRect = iconsRoot.getBoundingClientRect();
-		const iconRect = iconEl.getBoundingClientRect();
-		const x = iconRect.left + iconRect.width / 2 - rootRect.left - indicator.offsetWidth / 2;
-		indicator.style.transform = `translate(${x}px, 0)`;
-	}
-
-	let active = icons[0];
-	icons.forEach((icon) => {
-		icon.addEventListener('click', () => {
-			heroBg.src = `background-${icon.dataset.bg}.avif`;
-			active = icon;
-			moveIndicator(icon);
-		});
-	});
-
-	// Initial placement (after layout settles + indicator canvas sized).
-	requestAnimationFrame(() => requestAnimationFrame(() => moveIndicator(active)));
-	window.addEventListener('resize', () => moveIndicator(active));
-}
 
 // Video controls — own root (#video-root = .hero-video-wrap).
 await LiquidGlass.init({
@@ -939,6 +916,49 @@ await LiquidGlass.init({
 	root: document.getElementById('magnifier-root'),
 	glassElements: [document.getElementById('glass-magnifier')],
 });
+
+// ─── Tab switcher: clicking an icon swaps the background image
+//     and slides the indicator pill to that slot ───
+{
+	const heroRoot = document.getElementById('hero-root');
+	const heroBg = heroRoot.querySelector('.hero-bg');
+	const tabs = heroRoot.querySelector('.hero-tabs');
+	const indicator = document.getElementById('glass-tab-indicator');
+	const icons = tabs.querySelectorAll('.material-symbols-outlined');
+	const N = icons.length;
+	let activeIndex = 0;
+
+	function syncIndicator(animate) {
+		const rootRect = heroRoot.getBoundingClientRect();
+		const tabsRect = tabs.getBoundingClientRect();
+		const slotW = tabsRect.width / N;
+		const x = tabsRect.left - rootRect.left + activeIndex * slotW;
+		const y = tabsRect.top - rootRect.top;
+
+		if (!animate) indicator.style.transition = 'none';
+		indicator.style.width = slotW + 'px';
+		indicator.style.height = tabsRect.height + 'px';
+		indicator.style.transform = `translate(${x}px, ${y}px)`;
+		if (!animate) {
+			// Force a reflow before re-enabling the transition so the new
+			// transform doesn't animate from the off-screen sentinel value.
+			indicator.offsetHeight;
+			indicator.style.transition = '';
+		}
+	}
+
+	icons.forEach((icon, i) => {
+		icon.addEventListener('click', () => {
+			heroBg.src = `background-${icon.dataset.bg}.avif`;
+			activeIndex = i;
+			syncIndicator(true);
+		});
+	});
+
+	// Initial placement (snap, no animation).
+	requestAnimationFrame(() => requestAnimationFrame(() => syncIndicator(false)));
+	window.addEventListener('resize', () => syncIndicator(false));
+}
 
 const fpsEl = document.getElementById('hero-fps');
 setInterval(() => {
