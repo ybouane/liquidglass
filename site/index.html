@@ -59,6 +59,7 @@ body {
 	min-height: 100vh;
 	overflow: hidden;
 	align-content: center;
+	align-items: center;
 
 	.hero-bg {
 		position: absolute;
@@ -129,16 +130,15 @@ body {
 	.hero-video-wrap {
 		grid-area: video;
 		position: relative;
-		border-radius: 16px;
-		overflow: hidden;
 		z-index: 1;
 		aspect-ratio: 16 / 9;
-
+		
 		video {
 			width: 100%;
 			height: 100%;
 			object-fit: cover;
 			display: block;
+			border-radius: 16px;
 		}
 	}
 
@@ -630,8 +630,11 @@ code[class*="language-"] {
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ -->
 <div id="hero-root">
 
-	<!-- Background image -->
-	<img class="hero-bg" src="background-1.avif" alt="">
+	<!-- Background images — all three live in the DOM; the active one
+	     gets display:block via JS, the others display:none. -->
+	<img class="hero-bg" data-bg="1" src="background-1.avif" alt="">
+	<img class="hero-bg" data-bg="2" src="background-2.avif" alt="" style="display:none">
+	<img class="hero-bg" data-bg="3" src="background-3.avif" alt="" style="display:none">
 
 	<!-- Title -->
 	<div class="hero-title">
@@ -1025,7 +1028,7 @@ await LiquidGlass.init({
 //     and slides the indicator pill to that slot ───
 {
 	const heroRoot = document.getElementById('hero-root');
-	const heroBg = heroRoot.querySelector('.hero-bg');
+	const bgImages = heroRoot.querySelectorAll('.hero-bg');
 	const tabs = heroRoot.querySelector('.hero-tabs');
 	const indicator = document.getElementById('glass-tab-indicator');
 	const icons = tabs.querySelectorAll('.material-symbols-outlined');
@@ -1051,9 +1054,15 @@ await LiquidGlass.init({
 		}
 	}
 
+	function setActiveBg(bg) {
+		for (const img of bgImages) {
+			img.style.display = img.dataset.bg === bg ? 'block' : 'none';
+		}
+	}
+
 	icons.forEach((icon, i) => {
 		icon.addEventListener('click', () => {
-			heroBg.src = `background-${icon.dataset.bg}.avif`;
+			setActiveBg(icon.dataset.bg);
 			activeIndex = i;
 			syncIndicator(true);
 		});
