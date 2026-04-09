@@ -122,8 +122,13 @@ export class HtmlCapture {
 	dpr: number;
 	/** Elements with an in-flight html-to-image re-capture (dedupe). */
 	private readonly _capturing = new Set<HTMLElement>();
-	/** Optional callback fired when an async re-capture finishes and the cache changes. */
-	onCacheUpdate: (() => void) | null = null;
+	/**
+	 * Optional callback fired when an async re-capture finishes and
+	 * the cache changes. Receives the element whose cache entry was
+	 * just (re)written so the consumer can scope its dirty marking
+	 * to glasses that actually intersect that element.
+	 */
+	onCacheUpdate: ((element: HTMLElement) => void) | null = null;
 	/**
 	 * Prefetched @font-face CSS (with base64 src URLs) used for every
 	 * subsequent toCanvas call. Computed once at init via prefetchFontEmbedCSS.
@@ -350,7 +355,7 @@ export class HtmlCapture {
 			});
 
 			this.cache.set(element, { canvas: rendered, w, h });
-			this.onCacheUpdate?.();
+			this.onCacheUpdate?.(element);
 		} catch (err) {
 			console.warn('LiquidGlass: html-to-image capture failed for element:', element, err);
 		}

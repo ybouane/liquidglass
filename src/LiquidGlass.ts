@@ -107,7 +107,32 @@ export class LiquidGlass {
 	private _running = false;
 	private _rafId = 0;
 	private _hasDynamic = false;
-	private _dirty = true;
+	/**
+	 * Genuinely-global dirty flag — set by events that legitimately
+	 * affect every glass at once (resize, WebGL context restored,
+	 * structural mutation of root, end of _start). On the next frame
+	 * the entry guard promotes it into per-element dirty marks for
+	 * every glass in glassSet, then clears itself.
+	 */
+	private _globalDirty = true;
+	/**
+	 * Per-element shader-render dirty set. Each entry is a glass
+	 * element that needs its WebGL pipeline to re-run on the next
+	 * frame. Drained at the end of _renderFrame.
+	 *
+	 * Mirrors _glassContentDirty (which tracks html-to-image content
+	 * captures) but for the WebGL shader pass instead of the DOM
+	 * raster pass — they have different triggers.
+	 */
+	private readonly _glassDirty = new Set<HTMLElement>();
+	/**
+	 * Elements (typically wrappers, glasses themselves, or descendants
+	 * of root) explicitly marked changed via the public markChanged()
+	 * API. The next frame fans each one out into _glassDirty by
+	 * intersecting against every glass's sample rect, then clears
+	 * the set.
+	 */
+	private readonly _userMarkedChanged = new Set<HTMLElement>();
 	private _capturingGlassContent = false;
 	/**
 	 * Glass elements whose content image is stale and needs to be
@@ -157,20 +182,24 @@ export class LiquidGlass {
 		this.glassSet = new Set(Array.from(glassElements || []));
 		this.glassCanvases = new Map();
 		this.capture = new HtmlCapture(root);
-		// When an async html-to-image re-capture finishes, mark dirty
-		// so the next frame picks up the refreshed cache. Without this,
-		// pages with no dynamic content would never re-render after a
-		// stale cache was refreshed in the background.
-		this.capture.onCacheUpdate = () => { this._dirty = true; };
+		// When an async html-to-image re-capture finishes, mark only
+		// the glasses whose sample rect intersects that element's
+		// bounds — they're the only ones whose composed scene
+		// actually changed. Other glasses on the page can keep
+		// their existing shader output unchanged.
+		this.capture.onCacheUpdate = (element) => {
+			this._markGlassesIntersecting(element);
+		};
 		this.renderer = new GlassRenderer();
 		this._sceneCanvas = document.createElement('canvas');
 		this._sceneCtx = this._sceneCanvas.getContext('2d')!;
 
 		// When the WebGL context is restored, invalidate all caches so
-		// the render loop rebuilds everything on the next frame.
+		// the render loop rebuilds everything on the next frame. This
+		// is genuinely global — every shader output canvas was lost.
 		this.renderer.canvas.addEventListener('webglcontextrestored', () => {
 			this._glassCache.clear();
-			this._dirty = true;
+			this._globalDirty = true;
 		});
 
 		this._onResize = this._handleResize.bind(this);
@@ -210,22 +239,30 @@ export class LiquidGlass {
 		window.addEventListener('pointerup', this._onPointerUp);
 
 		this._observer = new MutationObserver(() => {
+			// Structural mutation: painting order may have shifted,
+			// every glass needs to re-render.
 			this._sortedChildren = this._getSortedChildren();
-			this._dirty = true;
+			this._globalDirty = true;
 		});
 		this._observer.observe(this.root, { childList: true });
 
 		this._glassSubtreeObserver = new MutationObserver((mutations) => {
 			for (const mutation of mutations) {
+				const owner = this._closestGlassAncestor(mutation.target);
 				if (mutation.type === 'attributes' && mutation.attributeName === 'data-config') {
-					this._dirty = true;
+					// Config change → just re-shade this glass + any
+					// glass that depends on its rendered output.
+					if (owner) this._markGlassAndDependents(owner);
 					continue;
 				}
-				// Mark only the affected glass element as dirty, so a
-				// mutation inside one glass subtree doesn't force every
-				// other glass element to re-capture too.
-				const owner = this._closestGlassAncestor(mutation.target);
-				if (owner) this._glassContentDirty.add(owner);
+				// Subtree mutation → the glass's content image needs
+				// to be re-captured AND its shader re-run (since the
+				// content image is what we composite on top of the
+				// shader output).
+				if (owner) {
+					this._glassContentDirty.add(owner);
+					this._markGlassAndDependents(owner);
+				}
 			}
 		});
 		for (const el of this.glassSet) {
@@ -240,7 +277,7 @@ export class LiquidGlass {
 		this._glassContentDirty.clear();
 
 		this._running = true;
-		this._dirty = true;
+		this._globalDirty = true;
 		this._rafId = requestAnimationFrame(() => this._renderLoop());
 	}
 
@@ -356,14 +393,120 @@ export class LiquidGlass {
 		return null;
 	}
 
+	/**
+	 * Mark a glass element (and any glass that visually depends on it
+	 * via z-order overlap) as needing a shader re-render on the next
+	 * frame.
+	 *
+	 * `rectOverride` lets callers pass a rect that differs from the
+	 * element's current bounding box — useful for drag, where we
+	 * want to invalidate both the *old* and *new* footprints in the
+	 * same call so glasses behind the dragged panel can clear its
+	 * trail and glasses ahead can pick up its new shadow.
+	 */
+	private _markGlassAndDependents(
+		element: HTMLElement,
+		rectOverride?: DOMRect,
+	): void {
+		// 1. The element itself, if it's a glass.
+		if (this.glassSet.has(element)) {
+			this._glassDirty.add(element);
+		}
+
+		// 2. Glass elements rendered AFTER `element` in the painting
+		//    order whose sample rect intersects element's bounds.
+		//    They read element via _composeSceneForGlass (either as a
+		//    non-glass contributor or via _drawPriorGlassToScene).
+		const rootRect = this.root.getBoundingClientRect();
+		const dpr = window.devicePixelRatio || 1;
+		const elementDOMRect = rectOverride ?? element.getBoundingClientRect();
+		// Pad by SHADOW_PAD when the element itself is a glass — its
+		// rendered output extends that far past its CSS box. For non-
+		// glass contributors the bounds are exact (their paint overflow
+		// is handled by `_getPaintOverflowPad` at draw time, which is
+		// fine for visual fidelity but not relevant to dirty marking).
+		const elementBox = this._getPixelRect(
+			elementDOMRect,
+			rootRect,
+			dpr,
+			this.glassSet.has(element) ? SHADOW_PAD : 0,
+		);
+
+		let seenElement = false;
+		for (const child of this._sortedChildren) {
+			if (child === element) { seenElement = true; continue; }
+			if (!seenElement) continue;
+			if (!this.glassSet.has(child)) continue;
+			const sampleRect = this._getSampleRect(
+				child.getBoundingClientRect(), rootRect, dpr,
+			);
+			if (LiquidGlass._rectsIntersect(elementBox, sampleRect)) {
+				this._glassDirty.add(child);
+			}
+		}
+	}
+
+	/**
+	 * Mark every glass element whose sample rect intersects the given
+	 * element's bounding rect, regardless of stacking order. Used by
+	 * the async cache-update callback (a wrapper's pixels just got
+	 * fresh, so any glass that samples them needs to re-render) and
+	 * by the public markChanged() API for elements outside the glass
+	 * set.
+	 */
+	private _markGlassesIntersecting(element: HTMLElement): void {
+		const rootRect = this.root.getBoundingClientRect();
+		const dpr = window.devicePixelRatio || 1;
+		const elementBox = this._getPixelRect(
+			element.getBoundingClientRect(), rootRect, dpr,
+			this.glassSet.has(element) ? SHADOW_PAD : 0,
+		);
+		for (const glass of this.glassSet) {
+			const sampleRect = this._getSampleRect(
+				glass.getBoundingClientRect(), rootRect, dpr,
+			);
+			if (LiquidGlass._rectsIntersect(elementBox, sampleRect)) {
+				this._glassDirty.add(glass);
+			}
+		}
+	}
+
+	/**
+	 * Public API: mark an element (or all glass elements when called
+	 * with no arguments) as needing a shader re-render on the next
+	 * frame. Useful for content the library can't observe on its own —
+	 * a `<canvas>` whose pixels you just updated, an `<img>` you just
+	 * swapped via JS, a wrapper whose CSS background-image you just
+	 * changed, etc.
+	 *
+	 * For elements registered via `data-dynamic`, the library already
+	 * treats them as always-dirty and re-renders affected glasses
+	 * every frame; calling markChanged() on them is a no-op but is
+	 * harmless.
+	 *
+	 * @param element The element that changed visually. Pass nothing
+	 * (or `undefined`) to mark every glass on this instance dirty.
+	 */
+	markChanged(element?: HTMLElement): void {
+		if (!element) {
+			this._globalDirty = true;
+			return;
+		}
+		this._userMarkedChanged.add(element);
+	}
+
 	private _setupButtonListeners(el: HTMLElement): void {
 		const state: ButtonState = { hover: false, pressed: false };
 		this._buttonStates.set(el, state);
 
-		const onOver = () => { state.hover = true; this._dirty = true; };
-		const onOut = () => { state.hover = false; state.pressed = false; this._dirty = true; };
-		const onDown = () => { state.pressed = true; this._dirty = true; };
-		const onUp = () => { state.pressed = false; this._dirty = true; };
+		// Button state change just affects this button's shader uniforms
+		// (brightness on hover, zRadius/shadowSpread on press) — only
+		// this glass and any glass that overlays it need to re-render.
+		const mark = () => this._markGlassAndDependents(el);
+		const onOver = () => { state.hover = true; mark(); };
+		const onOut = () => { state.hover = false; state.pressed = false; mark(); };
+		const onDown = () => { state.pressed = true; mark(); };
+		const onUp = () => { state.pressed = false; mark(); };
 
 		el.addEventListener('pointerover', onOver);
 		el.addEventListener('pointerout', onOut);
@@ -602,9 +745,10 @@ export class LiquidGlass {
 		}
 
 		this._glassCache.clear();
-		// Resize affects every glass canvas — mark all of them dirty.
+		// Resize affects every glass canvas — mark all of them dirty
+		// (both content image and shader output).
 		for (const el of this.glassSet) this._glassContentDirty.add(el);
-		this._dirty = true;
+		this._globalDirty = true;
 	}
 
 	private _updateGlassCanvasSize(el: HTMLElement): void {
@@ -763,17 +907,26 @@ export class LiquidGlass {
 		if (posLeft > maxLeft) newTx -= posLeft - maxLeft;
 		if (posTop > maxTop) newTy -= posTop - maxTop;
 
+		// Mark glasses overlapping the OLD position so they re-render
+		// to clear the dragged element's previous footprint, THEN move
+		// the element, THEN mark glasses overlapping the NEW position
+		// so they pick up its new footprint.
+		const oldRect = el.getBoundingClientRect();
+		this._markGlassAndDependents(el, oldRect);
 		el.style.transform = `translate(${newTx}px, ${newTy}px)`;
-
-		this._dirty = true;
+		this._markGlassAndDependents(el);
 	}
 
 	private _handlePointerUp(_e: PointerEvent): void {
 		if (!this._drag.active) return;
-		this._drag.element!.style.cursor = '';
+		const dragged = this._drag.element!;
+		dragged.style.cursor = '';
 		this._drag.active = false;
 		this._drag.element = null;
-		this._dirty = true;
+		// `isDragging` flips off, so the per-glass gate stops forcing
+		// every-frame re-renders for this glass and its overlapping
+		// neighbours. Mark them once so they get a final clean render.
+		this._markGlassAndDependents(dragged);
 	}
 
 	// ────────────────────────────────────────────
@@ -793,7 +946,8 @@ export class LiquidGlass {
 		}
 
 		if (this._checkGlassSizeChanges()) {
-			this._dirty = true;
+			// _checkGlassSizeChanges already added the resized
+			// elements to _glassDirty per-element; nothing more to do.
 		}
 
 		if (this._glassContentDirty.size > 0 && !this._capturingGlassContent) {
@@ -819,33 +973,75 @@ export class LiquidGlass {
 		const rootRect = this.root.getBoundingClientRect();
 		const isDragging = this._drag.active;
 
-		const needsRender = this._dirty || this._hasDynamic || isDragging;
+		// 1. Fan out user markChanged() calls into per-glass dirty marks.
+		if (this._userMarkedChanged.size > 0) {
+			for (const el of this._userMarkedChanged) {
+				this._markGlassesIntersecting(el);
+			}
+			this._userMarkedChanged.clear();
+		}
+
+		// 2. Promote any global dirty into per-element dirties so the
+		//    rest of the loop only ever consults `_glassDirty`.
+		if (this._globalDirty) {
+			for (const el of this.glassSet) this._glassDirty.add(el);
+			this._globalDirty = false;
+		}
+
+		const needsRender = this._glassDirty.size > 0
+			|| this._hasDynamic
+			|| isDragging;
 		if (!needsRender) return;
 
-		let bgChanged = this._dirty;
+		// 3. Snapshot + drain the dirty set so anything added during
+		//    this frame's work (e.g. async cache landings) is picked
+		//    up on the next frame instead of getting clobbered.
+		const dirtyTargets = new Set(this._glassDirty);
+		this._glassDirty.clear();
+
+		// 4. Track which glass elements actually re-rendered this
+		//    frame, with their sample rect, so later glasses in the
+		//    z-order can detect "a prior glass that I overlap just
+		//    re-rendered → I need to refresh too."
+		const renderedThisFrame: Array<{ rect: SampleRect }> = [];
 
 		for (const child of this._sortedChildren) {
 			if (!this.glassSet.has(child)) continue;
-			bgChanged = this._renderGlassElement(child, rootRect, dpr, isDragging, bgChanged);
-		}
-
-		if (this._dirty) {
-			this._dirty = false;
+			this._renderGlassElement(
+				child,
+				rootRect,
+				dpr,
+				isDragging,
+				dirtyTargets,
+				renderedThisFrame,
+			);
 		}
 	}
 
 	/**
 	 * Render a single glass element by composing just the scene region
 	 * that can affect it, then running the shader over that local input.
-	 * Returns the updated bgChanged flag.
+	 *
+	 * Whether the shader actually re-runs depends on:
+	 *   - explicit dirty mark for this element (in `dirtyTargets`),
+	 *   - any earlier glass in z-order that re-rendered this frame
+	 *     and whose rect intersects this glass's sample rect,
+	 *   - this glass having moved since last frame (position cache),
+	 *   - this glass having dynamic contributors in its sample (video,
+	 *     data-dynamic),
+	 *   - or active drag involving this element.
+	 *
+	 * On render, an entry is pushed to `renderedThisFrame` so later
+	 * glasses can check whether they need to refresh too.
 	 */
 	private _renderGlassElement(
 		child: HTMLElement,
 		rootRect: DOMRect,
 		dpr: number,
 		isDragging: boolean,
-		bgChanged: boolean,
-	): boolean {
+		dirtyTargets: Set<HTMLElement>,
+		renderedThisFrame: Array<{ rect: SampleRect }>,
+	): void {
 		const config = this._getConfig(child);
 		const elRect = child.getBoundingClientRect();
 		const elW = child.offsetWidth;
@@ -863,9 +1059,22 @@ export class LiquidGlass {
 		const hasDynamicContributors = this._hasDynamic
 			&& this._glassHasDynamicContributors(child, sampleRect, rootRect, dpr);
 
+		// Did any earlier-rendered glass actually overlap this glass's
+		// sample rect? Replaces the old monotonic `bgChanged` boolean
+		// with a per-element intersection check.
+		let priorGlassChanged = false;
+		for (const r of renderedThisFrame) {
+			if (LiquidGlass._rectsIntersect(r.rect, sampleRect)) {
+				priorGlassChanged = true;
+				break;
+			}
+		}
+
+		const isExplicitlyDirty = dirtyTargets.has(child);
+
 		const needsShaderRender = isDragging
-			? (isBeingDragged || bgChanged || this._dirty || hasDynamicContributors)
-			: (!cached || posChanged || bgChanged || this._dirty || hasDynamicContributors);
+			? (isBeingDragged || isExplicitlyDirty || priorGlassChanged || hasDynamicContributors)
+			: (!cached || posChanged || isExplicitlyDirty || priorGlassChanged || hasDynamicContributors);
 
 		if (needsShaderRender && glassCanvas) {
 			this._composeSceneForGlass(child, sampleRect, rootRect, dpr);
@@ -894,10 +1103,8 @@ export class LiquidGlass {
 			);
 
 			this._glassCache.set(child, { centerX, centerY });
-			bgChanged = true;
+			renderedThisFrame.push({ rect: sampleRect });
 		}
-
-		return bgChanged;
 	}
 
 	/**
@@ -939,6 +1146,10 @@ export class LiquidGlass {
 		rootRect: DOMRect,
 		dpr: number,
 	): boolean {
+		// A glass element marked data-dynamic on its own root counts
+		// as always-dirty: forces every-frame shader re-runs.
+		if (this._childHasDynamicContent(currentGlass)) return true;
+
 		for (const child of this._sortedChildren) {
 			if (child === currentGlass) break;
 			if (this.glassSet.has(child)) continue;
@@ -969,16 +1180,34 @@ export class LiquidGlass {
 			return;
 		}
 
-		this._captureMediaDescendants(child, this._sceneCtx, sampleRect, rootRect, dpr);
+		// Wrapper-level early-out: if the wrapper's own (paint-padded)
+		// bounds don't intersect the sample rect, neither it nor its
+		// descendants can affect this glass panel — skip the entire
+		// querySelectorAll + html-to-image work.
+		//
+		// Caveat: a descendant absolutely-positioned outside the
+		// wrapper's box won't be drawn here. Such descendants are
+		// vanishingly rare in practice; if you hit it, give the escaped
+		// element its own wrapper or a `data-dynamic` annotation.
 		if (!this._elementTouchesSample(child, sampleRect, rootRect, dpr)) {
 			return;
 		}
 
+		// Draw any live media descendants (img/video/canvas) directly
+		// from their source elements via the fast `drawImage` path,
+		// since html-to-image can't rasterise videos.
+		this._captureMediaDescendants(child, this._sceneCtx, sampleRect, rootRect, dpr);
+
+		// Then composite the wrapper's HTML content via the cached
+		// html-to-image snapshot. captureElement is async; concurrent
+		// calls for the same element from multiple glass panels in the
+		// same frame are deduped via HtmlCapture's `_capturing` set,
+		// so the html-to-image pipeline runs at most once per frame
+		// per element regardless of how many glasses overlap it.
 		const isDynamic = child.hasAttribute('data-dynamic');
-		const hadCache = this.capture.cache.has(child);
 		this.capture.captureElement(child, isDynamic);
 		const rect = this._getPixelRect(child.getBoundingClientRect(), rootRect, dpr);
-		const drew = this.capture.drawCachedElement(
+		this.capture.drawCachedElement(
 			child,
 			this._sceneCtx,
 			rect.x - sampleRect.x,
@@ -986,9 +1215,10 @@ export class LiquidGlass {
 			rect.w,
 			rect.h,
 		);
-		if (!drew && !hadCache) {
-			this._dirty = true;
-		}
+		// On the very first frame nothing is in the cache yet — the
+		// async capture will fire onCacheUpdate when it lands, which
+		// adds the affected glasses back to _glassDirty for the next
+		// frame. No need to set a dirty flag synchronously.
 	}
 
 	/**

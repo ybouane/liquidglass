@@ -77,7 +77,7 @@ export const DEFAULTS: GlassConfig = {
 };
 
 /** Number of Gaussian blur passes (higher = smoother but slower) */
-export const BLUR_ITERATIONS = 6;
+export const BLUR_ITERATIONS = 3;
 
 /** Extra padding around each panel for rendering the drop shadow (px) */
-export const SHADOW_PAD = 60;
+export const SHADOW_PAD = 20;

@@ -75,6 +75,7 @@ Async — creates and starts a LiquidGlass instance. Resolves once the page's we
 
 - `.fps: number` — current measured frames-per-second (updated once per second).
 - `.destroy(): void` — stop the render loop, remove injected canvases, restore mutated inline styles, and free WebGL resources.
+- `.markChanged(element?: HTMLElement): void` — manually flag content the library can't observe on its own (see below).
 
 ```javascript
 const instance = await LiquidGlass.init({
@@ -139,11 +140,44 @@ Add `data-dynamic` to any **direct child of the root** whose contents change eve
 </div>
 ```
 
+`data-dynamic` elements are treated as **always dirty by definition** — the library re-rasterises them every frame and re-runs the shader for every glass that overlaps them. Use it sparingly: it's the only thing on the page that defeats the per-element dirty-tracking optimisation.
+
 `<video>` elements are auto-detected as dynamic — you don't need to add `data-dynamic` to them.
+
+For one-shot updates that don't happen every frame, prefer `instance.markChanged()` (see below) — it costs nothing on idle frames.
 
 ### `data-config`
 
 JSON string of per-element configuration options (see the table above). Must decode to an object; invalid JSON or non-object values are ignored with a console warning.
+
+## Manually invalidating content: `instance.markChanged()`
+
+The library auto-detects most things that affect the glass: DOM mutations inside glass subtrees, `data-config` changes, layout shifts, drag, hover/press, window resize, async capture cache landings, and `data-dynamic` / `<video>` elements (which are treated as **always dirty by definition** and re-rendered every frame).
+
+What it cannot detect:
+
+- A `<canvas>` whose pixels you just updated via `getContext('2d')` / WebGL.
+- An `<img>` whose `src` you just swapped via JS.
+- A wrapper whose CSS `background-image` or other paint property you just updated.
+- Anything else that changes visually without firing a DOM mutation the library is watching.
+
+For these cases, call:
+
+```javascript
+const instance = await LiquidGlass.init({ root, glassElements });
+
+// You just repainted a wrapper — only glasses overlapping it will re-render.
+instance.markChanged(myCanvasElement);
+
+// Or invalidate everything on this instance:
+instance.markChanged();
+```
+
+`markChanged(element)` walks every glass on the instance, finds the ones whose sample rect intersects the element's bounding rect, and marks just those for a re-render on the next frame. Glasses that don't overlap the element keep their cached output and skip the WebGL pipeline entirely.
+
+`markChanged()` with no argument flags every glass — useful as a "I don't know what changed but please redraw" escape hatch.
+
+For elements with `data-dynamic`, calling `markChanged` is harmless but unnecessary — the library already treats them as dirty every frame.
 
 ## Stacking & Z-Index
 
