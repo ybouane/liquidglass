@@ -582,12 +582,13 @@ export class HtmlCapture {
 				width: cssW,
 				height: cssH,
 				pixelRatio: this.dpr,
-				// Skip media elements — they're drawn via the fast path
-				// (drawImage) and html-to-image can't render video frames.
-				filter: (node: HTMLElement) => {
-					const tag = node.tagName;
-					return tag !== 'VIDEO' && tag !== 'CANVAS';
-				},
+				// No filter — html-to-image natively handles <canvas>
+				// (via toDataURL → <img>) and <video> (via drawImage
+				// into a temp canvas → toDataURL → <img>). Filtering
+				// them out was leaving transparent holes in the snapshot
+				// that broke z-layering when HTML content sat on top of
+				// a canvas or video.
+				//
 				// Reuse the prefetched font embed CSS so the captured
 				// raster renders with the page's actual webfont (e.g.
 				// Inter), keeping wraps and glyph positions aligned
