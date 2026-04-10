@@ -8,11 +8,11 @@ A liquid glass effect library for the web. Apply realistic glass refraction, blu
 npm install liquid-glass
 ```
 
-Or import directly via `<script type="module">`:
+Or skip the install and import directly from a CDN:
 
 ```html
 <script type="module">
-  import { LiquidGlass } from 'liquid-glass';
+  import { LiquidGlass } from 'https://cdn.jsdelivr.net/npm/liquid-glass/dist/index.js';
 </script>
 ```
 
