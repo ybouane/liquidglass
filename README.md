@@ -56,7 +56,7 @@ Or skip the install and import directly from a CDN:
 
 1. **Non-glass children of the root** are rasterised onto a hidden canvas using `html-to-image` (which clones the subtree, inlines computed styles, and renders via SVG `foreignObject`). Static children are captured once and cached; children with `data-dynamic` (or any `<video>`) are re-captured every frame.
 2. **`<img>`, `<canvas>`, and `<video>`** are drawn directly via `ctx.drawImage` (faster than `html-to-image`, and the only way to capture live video frames).
-3. **Glass elements** receive an injected child `<canvas>` that displays the WebGL output. For each glass element, the renderer crops the compositing canvas at the panel's location, runs an optional Gaussian blur, then runs a fragment shader that applies refraction, chromatic aberration, Fresnel reflection, multi-light specular highlights, an inner-stroke rim, and a drop shadow. The blurred sample is what the surface displays — the glass is always fully frosted.
+3. **Glass elements** receive an injected child `<canvas>` that displays the WebGL output. For each glass element, the renderer crops the scene at the panel's location, runs an optional Gaussian blur, then runs a fragment shader that applies refraction, chromatic aberration, Fresnel reflection, multi-light specular highlights, an inner-stroke rim, and a drop shadow.
 4. **Layered compositing** writes each rendered glass canvas back to the compositing canvas before the next glass element runs, so a glass element above another sees the lower one in its refraction.
 
 ## API
@@ -76,6 +76,10 @@ Async — creates and starts a LiquidGlass instance. Resolves once the page's we
 - `.fps: number` — current measured frames-per-second (updated once per second).
 - `.destroy(): void` — stop the render loop, remove injected canvases, restore mutated inline styles, and free WebGL resources.
 - `.markChanged(element?: HTMLElement): void` — manually flag content the library can't observe on its own (see below).
+
+The library also exports:
+
+- `invalidateFontEmbedCache(): void` — call after dynamically loading new font stylesheets so the next `init()` rebuilds the embedded font cache.
 
 ```javascript
 const instance = await LiquidGlass.init({
@@ -106,7 +110,7 @@ The library re-reads `data-config` whenever it changes (via a MutationObserver),
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `blurAmount` | `number` | `0.00` | Background blur — softens / frosts the captured background. The glass is always fully frosted; this controls how strongly (0&nbsp;– 1) |
+| `blurAmount` | `number` | `0.00` | Background blur strength (0 = sharp, 1 = maximum blur) |
 | `refraction` | `number` | `0.69` | How much the glass bends the image behind it |
 | `chromAberration` | `number` | `0.05` | Chromatic aberration / colour fringing at edges |
 | `edgeHighlight` | `number` | `0.05` | Edge glow / rim lighting intensity |
@@ -199,7 +203,7 @@ If you put an overlay above a background image and the glass shows the bg but no
 - **The root itself is never captured.** The shader samples the root's *children*, so any background image, padding, or border on the root is invisible to the glass effect. Put backgrounds in a sibling element *inside* the root.
 - **A `<canvas>` is injected as the glass element's first child** for shader output. Avoid `:first-child` selectors on glass elements.
 - **Multiple LiquidGlass roots cannot share refraction.** A glass element in one root cannot see what another root's glass elements are rendering — they each have their own compositing canvas.
-- **The shadow halo extends 60 px outside the glass element.** The injected canvas overflows its parent's box and will be clipped by any ancestor with `overflow: hidden`.
+- **The shadow halo extends beyond the glass element.** The injected canvas overflows its parent's box and will be clipped by any ancestor with `overflow: hidden`.
 
 ### Performance
 
@@ -209,17 +213,15 @@ If you put an overlay above a background image and the glass shows the bg but no
 - **Window resize re-captures everything.** Don't drive layout in a tight resize loop.
 - **The render loop short-circuits when nothing is dirty** — a static page with no `<video>` and no `data-dynamic` content does almost no work per frame.
 
-### Text alignment
+### Text & fonts
 
-- **Use integer-pixel `font-size` values** for any text that may sit under glass. Sub-pixel sizes (e.g. `0.92em`, `clamp(...)`) cause rounding differences between live HTML rendering and the SVG-foreignObject path used for capture, which shifts glyph positions inside the refraction.
-- **Webfonts must be loaded before `init()`** and served with CORS-friendly headers. Google Fonts, jsdelivr, and unpkg work out of the box. Webfonts loaded after init will fall back to system fonts inside captured rasters.
+- **Webfonts must be loaded before `init()`** and served with CORS-friendly headers. Google Fonts, jsdelivr, and unpkg work out of the box. Webfonts loaded after init will fall back to system fonts inside captured rasters. Call `invalidateFontEmbedCache()` then re-init if you load fonts dynamically.
 - **Cross-origin `<img>` elements need `crossorigin="anonymous"`.** Tainted canvases break texture upload and disable the glass effect for the entire root.
 
 ### API
 
 - **`LiquidGlass.init()` is async.** It resolves only after the font CSS prefetch, glass content pre-capture, and static-content pre-warm have all completed (typically 100–500 ms on a fresh page).
 - **`data-dynamic` only catches direct children of the root.** Live content nested inside a wrapper that lacks `data-dynamic` will not trigger re-captures.
-- **`html-to-image` cannot rasterise `<video>` or `<canvas>`** — the library handles them via a fast `drawImage` path instead.
 - **`destroy()` does not restore an element's original `position: static`** if the library overwrote it with `relative`. Re-init on the same elements is fine; exotic external mutation in between is not.
 
 ## Browser Support

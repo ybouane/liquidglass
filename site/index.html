@@ -546,6 +546,11 @@ code[class*="language-"] {
 }
 
 /* ── Config table ── */
+table-wrapper {
+	max-width: 100%;
+	overflow-x: auto;
+	display:block;
+}
 .config-table {
 	width: 100%;
 	border-collapse: collapse;
@@ -588,7 +593,7 @@ code[class*="language-"] {
 }
 
 /* ── Responsive ── */
-@media (max-width: 700px) {
+@media (max-width: 800px) {
 	#hero-root {
 		grid-template-columns: 1fr;
 		grid-template-rows: repeat(9, auto);
@@ -742,27 +747,29 @@ instance.destroy();</code></pre>
 	<h2>Configuration Options</h2>
 	<p>Each glass element can be configured individually via <code>data-config</code> (JSON) or globally via the <code>defaults</code> option:</p>
 
-	<table class="config-table">
-		<thead>
-			<tr><th>Option</th><th>Type</th><th>Default</th><th>Description</th></tr>
-		</thead>
-		<tbody>
-			<tr><td><code>blurAmount</code></td><td>number</td><td>0</td><td>Background blur strength — softens / frosts the captured background (0&ndash;1)</td></tr>
-			<tr><td><code>refraction</code></td><td>number</td><td>0.69</td><td>How much the glass bends light</td></tr>
-			<tr><td><code>chromAberration</code></td><td>number</td><td>0.05</td><td>Color fringing at edges</td></tr>
-			<tr><td><code>edgeHighlight</code></td><td>number</td><td>0.05</td><td>Inner glow / rim lighting</td></tr>
-			<tr><td><code>specular</code></td><td>number</td><td>0</td><td>Specular highlight (Blinn-Phong)</td></tr>
-			<tr><td><code>fresnel</code></td><td>number</td><td>1</td><td>Fresnel reflection at grazing angles</td></tr>
-			<tr><td><code>cornerRadius</code></td><td>number</td><td>65</td><td>Corner radius in CSS px</td></tr>
-			<tr><td><code>zRadius</code></td><td>number</td><td>40</td><td>Bevel depth (curvature)</td></tr>
-			<tr><td><code>brightness</code></td><td>number</td><td>0</td><td>Brightness adjustment (-0.5 to 0.5)</td></tr>
-			<tr><td><code>saturation</code></td><td>number</td><td>0</td><td>Saturation (-1 to 1)</td></tr>
-			<tr><td><code>shadowOpacity</code></td><td>number</td><td>0.3</td><td>Drop shadow opacity</td></tr>
-			<tr><td><code>floating</code></td><td>boolean</td><td>false</td><td>Enable drag-to-move</td></tr>
-			<tr><td><code>button</code></td><td>boolean</td><td>false</td><td>Button mode (hover/press shader feedback)</td></tr>
-			<tr><td><code>bevelMode</code></td><td>number</td><td>0</td><td>0 = biconvex pill, 1 = dome (flat bottom)</td></tr>
-		</tbody>
-	</table>
+	<table-wrapper>
+		<table class="config-table">
+			<thead>
+				<tr><th>Option</th><th>Type</th><th>Default</th><th>Description</th></tr>
+			</thead>
+			<tbody>
+				<tr><td><code>blurAmount</code></td><td>number</td><td>0</td><td>Background blur strength (0 = sharp, 1 = maximum blur)</td></tr>
+				<tr><td><code>refraction</code></td><td>number</td><td>0.69</td><td>How much the glass bends light</td></tr>
+				<tr><td><code>chromAberration</code></td><td>number</td><td>0.05</td><td>Color fringing at edges</td></tr>
+				<tr><td><code>edgeHighlight</code></td><td>number</td><td>0.05</td><td>Inner glow / rim lighting</td></tr>
+				<tr><td><code>specular</code></td><td>number</td><td>0</td><td>Specular highlight (Blinn-Phong)</td></tr>
+				<tr><td><code>fresnel</code></td><td>number</td><td>1</td><td>Fresnel reflection at grazing angles</td></tr>
+				<tr><td><code>cornerRadius</code></td><td>number</td><td>65</td><td>Corner radius in CSS px</td></tr>
+				<tr><td><code>zRadius</code></td><td>number</td><td>40</td><td>Bevel depth (curvature)</td></tr>
+				<tr><td><code>brightness</code></td><td>number</td><td>0</td><td>Brightness adjustment (-0.5 to 0.5)</td></tr>
+				<tr><td><code>saturation</code></td><td>number</td><td>0</td><td>Saturation (-1 to 1)</td></tr>
+				<tr><td><code>shadowOpacity</code></td><td>number</td><td>0.3</td><td>Drop shadow opacity</td></tr>
+				<tr><td><code>floating</code></td><td>boolean</td><td>false</td><td>Enable drag-to-move</td></tr>
+				<tr><td><code>button</code></td><td>boolean</td><td>false</td><td>Button mode (hover/press shader feedback)</td></tr>
+				<tr><td><code>bevelMode</code></td><td>number</td><td>0</td><td>0 = biconvex pill, 1 = dome (flat bottom)</td></tr>
+			</tbody>
+		</table>
+	</table-wrapper>
 
 	<!-- ── Example: Frosted Panel ── -->
 	<h2>Frosted Panel</h2>
@@ -838,15 +845,14 @@ instance.destroy();</code></pre>
 	<h3>Performance</h3>
 	<ul>
 		<li><strong>Capturing DOM into a canvas is expensive.</strong> Every non-glass wrapper is rasterised via <code>html-to-image</code> (style inlining + SVG-foreignObject decode). Keep wrappers small and shallow.</li>
-		<li><strong><code>data-dynamic</code> elements are treated as always dirty by definition.</strong> Use it only for content that genuinely changes every frame — animations, counters, charts. For one-shot updates that don't happen every frame, prefer <code>instance.markChanged()</code> (see below) — it costs nothing on idle frames.</li>
+		<li><strong><code>data-dynamic</code> elements are treated as always dirty by definition.</strong> Use it only for content that genuinely changes every frame — animations, counters, charts. For one-shot updates, prefer <code>instance.markChanged()</code> instead — it costs nothing on idle frames.</li>
 		<li><strong>Each LiquidGlass instance opens its own WebGL context.</strong> Browsers cap concurrent contexts (typically 16 system-wide); don't spawn dozens.</li>
 		<li><strong>Window resize re-captures everything.</strong> Don't drive layout in a tight resize loop.</li>
 	</ul>
 
-	<h3>Text alignment</h3>
+	<h3>Text &amp; fonts</h3>
 	<ul>
-		<li><strong>Use integer-pixel <code>font-size</code> values</strong> for any text that may sit under glass. Sub-pixel sizes (e.g. <code>0.92em</code>, <code>clamp(...)</code>) cause sub-pixel rounding differences between live HTML rendering and the SVG-foreignObject path used for capture, which shifts glyph positions inside the refraction.</li>
-		<li><strong>Webfonts must be loaded before <code>init()</code></strong> and served with CORS-friendly headers. Google Fonts, jsdelivr, and unpkg work out of the box. Self-hosted fonts on a same-origin server need no special config. Webfonts loaded after init will fall back to system fonts inside captured rasters.</li>
+		<li><strong>Webfonts must be loaded before <code>init()</code></strong> and served with CORS-friendly headers. Google Fonts, jsdelivr, and unpkg work out of the box. Call <code>invalidateFontEmbedCache()</code> then re-init if you load fonts dynamically.</li>
 		<li><strong>Cross-origin <code>&lt;img&gt;</code> elements need <code>crossorigin="anonymous"</code></strong>. Tainted canvases break texture upload and disable the glass effect for the entire root.</li>
 	</ul>
 
@@ -854,17 +860,10 @@ instance.destroy();</code></pre>
 	<ul>
 		<li><strong><code>LiquidGlass.init()</code> is async</strong> — it resolves only after font CSS prefetch, glass content pre-capture, and static-content pre-warm have all completed. On a slow connection that can be 100&ndash;500&nbsp;ms.</li>
 		<li><strong><code>data-dynamic</code> only catches direct children of the root.</strong> A live element nested inside a wrapper that lacks <code>data-dynamic</code> will not trigger re-captures.</li>
-		<li><strong>The library auto-detects <code>&lt;video&gt;</code> elements as dynamic</strong> — you don't need to add <code>data-dynamic</code> to them.</li>
-		<li><strong><code>html-to-image</code> cannot rasterise <code>&lt;video&gt;</code> or <code>&lt;canvas&gt;</code></strong>. The library handles them via a fast <code>drawImage</code> path instead.</li>
+		<li><strong>The library auto-detects <code>&lt;video&gt;</code> elements as dynamic</strong> &mdash; you don't need to add <code>data-dynamic</code> to them.</li>
+		<li><strong><code>instance.markChanged(element)</code></strong> &mdash; call after updating something the library can't observe on its own (a <code>&lt;canvas&gt;</code> you just painted, an <code>&lt;img&gt;</code> you swapped, a CSS property you toggled). Only glasses overlapping that element re-render. Call with no argument to invalidate everything.</li>
+		<li><strong><code>invalidateFontEmbedCache()</code></strong> &mdash; call after dynamically loading new font stylesheets so the next <code>init()</code> rebuilds the embedded font cache.</li>
 	</ul>
-</div>
-
-<!-- ━━━━━━━━━━━━ MANUAL INVALIDATION ━━━━━━━━━━━━ -->
-<div class="section">
-	<h2><code>instance.markChanged()</code></h2>
-	<p>Call <code>markChanged(element)</code> after you update something the library can't observe on its own &mdash; a <code>&lt;canvas&gt;</code> you just painted, an <code>&lt;img&gt;</code> you just swapped, a CSS property you just toggled. Only glasses overlapping that element will re-render. Call with no argument to invalidate everything.</p>
-	<pre class="language-javascript"><code>instance.markChanged(myCanvasElement); // targeted
-instance.markChanged();                // everything</code></pre>
 </div>
 
 <!-- ━━━━━━━━━━━━ FOOTER ━━━━━━━━━━━━ -->
