@@ -6,7 +6,7 @@
 <title>LiquidGlass — WebGL Glass Effects for the Web</title>
 <meta name="description" content="Apply realistic glass refraction, blur, chromatic aberration, and lighting effects to any HTML element using WebGL shaders.">
 
-<link rel="icon" type="image/png" href="/favicon.png">
+<link rel="icon" type="image/png" href="./favicon.png">
 
 <!-- Open Graph -->
 <meta property="og:title" content="LiquidGlass">
@@ -849,7 +849,7 @@ instance.destroy();</code></pre>
 <div class="section">
 	<h2>Limitations &amp; Gotchas</h2>
 	<p>
-		The library leans on real-time DOM rasterisation and a multi-pass WebGL pipeline. That comes with a handful of constraints worth knowing before you wire it into a production page.
+		The runtime is much lighter than the earliest versions, but it still combines DOM capture, compositing, and WebGL shading. These are the practical constraints and performance tradeoffs to keep in mind when you wire it into a real page.
 	</p>
 
 	<h3>Structural</h3>
@@ -862,10 +862,13 @@ instance.destroy();</code></pre>
 
 	<h3>Performance</h3>
 	<ul>
-		<li><strong>Capturing DOM into a canvas is expensive.</strong> Every non-glass wrapper is rasterised via <code>html-to-image</code> (style inlining + SVG-foreignObject decode). Keep wrappers small and shallow.</li>
-		<li><strong><code>data-dynamic</code> elements are treated as always dirty by definition.</strong> Use it only for content that genuinely changes every frame — animations, counters, charts. For one-shot updates, prefer <code>instance.markChanged()</code> instead — it costs nothing on idle frames.</li>
+		<li><strong>The library now parks completely on idle frames.</strong> A static scene no longer burns a permanent <code>requestAnimationFrame</code> loop; rendering wakes up only when content, layout, hover/press state, drag state, video, or explicit invalidation changes.</li>
+		<li><strong><code>html-to-image</code> is still the heaviest code path.</strong> Media elements are cheap because they draw directly, but non-glass wrappers still need DOM rasterisation. Keep those wrappers shallow when possible.</li>
+		<li><strong><code>data-dynamic</code> is what defeats most caching.</strong> Use it only for genuinely live content such as counters, charts, or animated text. For one-shot changes, prefer <code>instance.markChanged()</code> so the page can remain idle the rest of the time.</li>
+		<li><strong>Mobile devices now use an adaptive quality profile.</strong> On coarse-pointer / constrained devices the renderer caps effective DPR and runs blur on a smaller buffer with fewer passes to reduce battery, thermals, and GPU cost.</li>
+		<li><strong>Desktop keeps full quality but does less CPU work.</strong> Bounds, descendant queries, media fit styles, paint-overflow checks, and canvas contexts are cached per frame so overlapping glass panels do not keep recomputing the same data.</li>
+		<li><strong>Resize is still a full invalidation event.</strong> The library rebuilds glass canvases and recaptures content on resize, so avoid driving layout in a tight resize loop.</li>
 		<li><strong>Each LiquidGlass instance opens its own WebGL context.</strong> Browsers cap concurrent contexts (typically 16 system-wide); don't spawn dozens.</li>
-		<li><strong>Window resize re-captures everything.</strong> Don't drive layout in a tight resize loop.</li>
 	</ul>
 
 	<h3>Text &amp; fonts</h3>
@@ -959,8 +962,7 @@ instance.destroy();</code></pre>
 </script>
 
 <script type="module">
-//import { LiquidGlass } from '../dist/index.js';
-import { LiquidGlass } from 'https://cdn.jsdelivr.net/npm/@ybouane/liquidglass/dist/index.js';
+import { LiquidGlass } from '../dist/index.js';
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // HERO — single root, nested glass elements
