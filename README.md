@@ -60,10 +60,11 @@ Or skip the install and import directly from a CDN:
 
 ## How It Works
 
-1. **Non-glass children of the root** are rasterised onto a hidden canvas using `html-to-image` (which clones the subtree, inlines computed styles, and renders via SVG `foreignObject`). Static children are captured once and cached; children with `data-dynamic` (or any `<video>`) are re-captured every frame.
-2. **`<img>`, `<canvas>`, and `<video>`** are drawn directly via `ctx.drawImage` (faster than `html-to-image`, and the only way to capture live video frames).
-3. **Glass elements** receive an injected child `<canvas>` that displays the WebGL output. For each glass element, the renderer crops the scene at the panel's location, runs an optional Gaussian blur, then runs a fragment shader that applies refraction, chromatic aberration, Fresnel reflection, multi-light specular highlights, an inner-stroke rim, and a drop shadow.
-4. **Layered compositing** writes each rendered glass canvas back to the compositing canvas before the next glass element runs, so a glass element above another sees the lower one in its refraction.
+1. **Non-glass children of the root** are turned into a local scene for each glass panel. Simple media (`<img>`, `<canvas>`, `<video>`) are drawn directly via `drawImage`; other DOM wrappers are rasterised with `html-to-image`.
+2. **Static content is cached aggressively.** Wrappers that are not marked `data-dynamic` are captured once, reused, and only refreshed when layout, config, or observed content changes.
+3. **Glass elements** receive an injected child `<canvas>` that displays the WebGL result. For each panel, the renderer crops the relevant scene region, runs an optional blur pass, then shades refraction, chromatic aberration, Fresnel reflection, highlights, tint, and shadow.
+4. **Overlapping glass is composited in order.** As each panel renders, its result is written back into the local scene so later glass panels can refract earlier ones correctly.
+5. **The runtime adapts to the device.** Idle pages stop scheduling animation frames entirely, coarse-pointer / constrained devices use a lighter blur profile, and desktop renders reuse per-frame layout and DOM query caches to reduce CPU overhead.
 
 ## API
 
@@ -213,11 +214,13 @@ If you put an overlay above a background image and the glass shows the bg but no
 
 ### Performance
 
-- **Capturing DOM into a canvas is expensive.** Every non-glass wrapper is rasterised via `html-to-image` (style inlining + SVG-foreignObject decode). Keep wrappers small and shallow.
-- **`data-dynamic` re-captures every frame.** Use it sparingly — only for content that actually changes.
-- **Each LiquidGlass instance opens its own WebGL context.** Browsers cap concurrent contexts (typically 16 system-wide); don't spawn dozens.
-- **Window resize re-captures everything.** Don't drive layout in a tight resize loop.
-- **The render loop short-circuits when nothing is dirty** — a static page with no `<video>` and no `data-dynamic` content does almost no work per frame.
+- **`html-to-image` is still the most expensive path.** Keep non-glass wrappers shallow when possible; images, videos, and canvases are much cheaper because they bypass DOM rasterisation.
+- **`data-dynamic` is the main escape hatch from caching.** Use it only for content that truly changes every frame. For one-off visual updates, prefer `instance.markChanged()` so the page can stay idle otherwise.
+- **Idle pages do not spin a permanent render loop.** When nothing is dirty, the instance stops requesting animation frames and wakes back up only on observed changes, drag, hover/press state, video, or explicit invalidation.
+- **Mobile devices use an adaptive quality profile.** On coarse-pointer / constrained devices the renderer caps effective DPR and runs blur on a smaller buffer with fewer passes to reduce battery, thermal, and GPU pressure.
+- **Desktop keeps quality but avoids repeated work.** Per-frame caches reuse bounds, padded rects, paint-overflow checks, dynamic/media descendant lookups, media fit styles, and canvas contexts across overlapping glass panels.
+- **Resize is still a global invalidation event.** The library rebuilds canvas sizes and recaptures content on resize, so avoid driving layout in a tight resize loop.
+- **Each LiquidGlass instance opens its own WebGL context.** Browsers cap concurrent contexts (typically around 16 system-wide), so avoid creating lots of independent roots.
 
 ### Text & fonts
 
@@ -232,7 +235,7 @@ If you put an overlay above a background image and the glass shows the bg but no
 
 ## Browser Support
 
-Requires WebGL 1.0 + Canvas 2D + SVG `foreignObject`. Effectively all evergreen browsers (Chrome, Firefox, Safari, Edge). WebGL context loss is recovered automatically.
+Requires WebGL 1.0 + Canvas 2D + SVG `foreignObject`. In practice that means current evergreen browsers (Chrome, Safari, Firefox, Edge). WebGL context loss is recovered automatically, and the runtime will fall back to lighter quality settings on constrained devices rather than exposing extra API flags.
 
 ## License
 

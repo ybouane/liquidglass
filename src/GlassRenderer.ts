@@ -161,10 +161,13 @@ export class GlassRenderer {
 		width: number,
 		height: number,
 		blurAmount: number,
+		blurDownsample = 1,
+		blurIterations = BLUR_ITERATIONS,
 	): void {
 		if (this.contextLost) return;
 		const gl = this.gl;
-		if (!this._setActiveSize(width, height)) return;
+		const effectiveBlurScale = blurAmount > 0 ? Math.max(0.25, Math.min(1, blurDownsample)) : 1;
+		if (!this._setActiveSize(width, height, effectiveBlurScale)) return;
 		const W = this.width;
 		const H = this.height;
 		const fboSet = this.activeFBOs!;
@@ -210,7 +213,7 @@ export class GlassRenderer {
 			const spread = blurAmount * 2.5;
 			gl.useProgram(this.blurP);
 			gl.uniform1i(this.blurU.u_tex, 0);
-			for (let i = 0; i < BLUR_ITERATIONS; i++) {
+			for (let i = 0; i < blurIterations; i++) {
 				gl.bindFramebuffer(gl.FRAMEBUFFER, fboSet.blurB.fbo);
 				gl.viewport(0, 0, bw, bh);
 				gl.bindTexture(gl.TEXTURE_2D, fboSet.blurA.tex);
@@ -315,7 +318,7 @@ export class GlassRenderer {
 	// FBO management
 	// ────────────────────────────────────────────
 
-	private _setActiveSize(w: number, h: number): boolean {
+	private _setActiveSize(w: number, h: number, blurScale = 1): boolean {
 		if (w <= 0 || h <= 0) return false;
 
 		this.width = w;
@@ -326,13 +329,15 @@ export class GlassRenderer {
 			this.canvas.height = Math.max(this.canvas.height, h);
 		}
 
-		const key = `${w}x${h}`;
+		const blurW = Math.max(1, Math.round(w * blurScale));
+		const blurH = Math.max(1, Math.round(h * blurScale));
+		const key = `${w}x${h}@${blurW}x${blurH}`;
 		let fboSet = this.fboCache.get(key);
 		if (!fboSet) {
 			fboSet = {
 				bg: this._makeFBO(w, h),
-				blurA: this._makeFBO(w, h),
-				blurB: this._makeFBO(w, h),
+				blurA: this._makeFBO(blurW, blurH),
+				blurB: this._makeFBO(blurW, blurH),
 			};
 			this.fboCache.set(key, fboSet);
 		}
