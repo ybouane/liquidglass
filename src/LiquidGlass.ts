@@ -994,8 +994,9 @@ export class LiquidGlass {
 		}
 
 		if (this._checkGlassSizeChanges()) {
-			// _checkGlassSizeChanges already added the resized
-			// elements to _glassDirty per-element; nothing more to do.
+			// Resizing clears the output canvas. Repaint it and any glass
+			// that sampled its previous bounds, including after a shrink.
+			this._globalDirty = true;
 		}
 
 		if (this._glassContentDirty.size > 0 && !this._capturingGlassContent) {

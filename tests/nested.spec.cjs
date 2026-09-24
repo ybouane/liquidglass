@@ -44,6 +44,11 @@ test('nested native controls own their canvases and sample the scrolling backdro
   await expect(page).toHaveURL(/#new$/);
   await page.setViewportSize({ width: 700, height: 650 });
   await expect.poll(() => page.locator('search > canvas').evaluate(canvas => canvas.width)).toBeGreaterThan(600);
+  // Growing a control (for example with larger text) does not resize the window.
+  const oldHeight = await page.locator('search > canvas').evaluate(canvas => canvas.height);
+  await page.getByRole('searchbox').evaluate(input => { input.style.height = '80px'; });
+  await expect.poll(() => page.locator('search > canvas').evaluate(canvas => canvas.height)).toBeGreaterThan(oldHeight);
+  await expect.poll(async () => (await pixels(page))[3]).toBeGreaterThan(200);
   await page.evaluate(() => { window.instance.destroy(); document.body.classList.remove('ready'); });
   await expect(page.locator('.glass > canvas')).toHaveCount(0);
   await expect(page.getByRole('searchbox')).toHaveValue('a thought');
