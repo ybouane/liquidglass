@@ -307,3 +307,13 @@ reinitialization, invalid layouts, and the original direct-child API.
 ## License
 
 MIT
+
+### Reusing a renderer across page navigation
+
+`GlassRenderer` can outlive individual scenes. Pass a caller-owned renderer to
+`LiquidGlass.init({ root, backdropRoot, glassElements, renderer, signal })`.
+Destroy the previous scene before starting the next one. Scene disposal removes
+its observers, handlers and control canvases and releases captured GPU pixels,
+while retaining the shared context and compiled shaders. Call
+`renderer.destroy()` when the document no longer needs it. An optional
+`AbortSignal` cancels initialization and cleans up a partially created scene.

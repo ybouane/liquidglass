@@ -119,3 +119,45 @@ test('destroy restores control styles and keeps text selectable', async ({ page 
   await expect(page.locator('body')).toHaveCSS('user-select', 'text');
   await expect(page.locator('canvas')).toHaveCount(0);
 });
+
+test('sequential scenes reuse one context and final disposal releases it', async ({ page }) => {
+  const warnings = [];
+  page.on('console', message => { if (/too many active WebGL/i.test(message.text())) warnings.push(message.text()); });
+  await open(page);
+  const result = await page.evaluate(async () => {
+    const { GlassRenderer } = await import('/dist/index.js');
+    const renderer = new GlassRenderer();
+    const gl = renderer.gl;
+    for (let i = 0; i < 20; i++) {
+      await window.start({ renderer });
+      const scene = window.instance;
+      if (scene.renderer.gl !== gl) throw new Error('Renderer changed');
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      scene.destroy();
+      if (document.querySelector('.glass > canvas')) throw new Error('Control canvas leaked');
+      if (gl.isContextLost()) throw new Error('Borrowed renderer destroyed');
+    }
+    renderer.destroy();
+    return { lost: gl.isContextLost(), canvases: document.querySelectorAll('canvas').length };
+  });
+  expect(result).toEqual({ lost: true, canvases: 0 });
+  expect(warnings).toEqual([]);
+});
+
+test('cancelling startup cleans the scene without destroying its borrowed renderer', async ({ page }) => {
+  await open(page);
+  const result = await page.evaluate(async () => {
+    const { GlassRenderer } = await import('/dist/index.js');
+    const renderer = new GlassRenderer();
+    const events = new AbortController();
+    const starting = window.start({ renderer, signal: events.signal });
+    events.abort();
+    let error;
+    try { await starting; } catch (reason) { error = reason.name; }
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    const result = { error, controls: document.querySelectorAll('.glass > canvas').length, lost: renderer.gl.isContextLost() };
+    renderer.destroy();
+    return result;
+  });
+  expect(result).toEqual({ error: 'AbortError', controls: 0, lost: false });
+});

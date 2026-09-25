@@ -31,6 +31,10 @@ export interface LiquidGlassOptions {
 	backdropRoot?: HTMLElement;
 	/** Elements to apply the glass effect to. */
 	glassElements?: NodeListOf<HTMLElement> | HTMLElement[];
+	/** Caller-owned renderer, reusable across sequential scenes. Destroy it after the final scene. */
+	renderer?: GlassRenderer;
+	/** Cancel initialization and dispose the partially initialized scene. */
+	signal?: AbortSignal;
 	/** Override the default configuration values. */
 	defaults?: Partial<GlassConfig>;
 }
@@ -92,9 +96,20 @@ export class LiquidGlass {
 	// ────────────────────────────────────────────
 
 	static async init(options: LiquidGlassOptions): Promise<LiquidGlass> {
+		options.signal?.throwIfAborted();
 		const instance = new LiquidGlass(options);
-		await instance._start();
-		return instance;
+		const abort = () => instance.destroy();
+		options.signal?.addEventListener('abort', abort, { once: true });
+		try {
+			await instance._start();
+			options.signal?.throwIfAborted();
+			return instance;
+		} catch (error) {
+			instance.destroy();
+			throw error;
+		} finally {
+			options.signal?.removeEventListener('abort', abort);
+		}
 	}
 
 	// ────────────────────────────────────────────
@@ -112,6 +127,9 @@ export class LiquidGlass {
 	/** Current frames-per-second (updated every frame). */
 	fps = 0;
 
+	private _destroyed = false;
+	private readonly _ownsRenderer: boolean;
+	private readonly _onContextRestored: () => void;
 	private _running = false;
 	private _rafId = 0;
 	private _hasDynamic = false;
@@ -183,7 +201,7 @@ export class LiquidGlass {
 	// Constructor (prefer LiquidGlass.init)
 	// ────────────────────────────────────────────
 
-	constructor({ root, backdropRoot, glassElements, defaults = {} }: LiquidGlassOptions) {
+	constructor({ root, backdropRoot, glassElements, renderer, defaults = {} }: LiquidGlassOptions) {
 		if (!root) throw new Error('LiquidGlass: `root` element is required.');
 
 		this.root = root;
@@ -218,17 +236,19 @@ export class LiquidGlass {
 		this.capture.onCacheUpdate = (element) => {
 			this._markGlassesIntersecting(element);
 		};
-		this.renderer = new GlassRenderer();
+		this._ownsRenderer = !renderer;
+		this.renderer = renderer ?? new GlassRenderer();
 		this._sceneCanvas = document.createElement('canvas');
 		this._sceneCtx = this._sceneCanvas.getContext('2d')!;
 
 		// When the WebGL context is restored, invalidate all caches so
 		// the render loop rebuilds everything on the next frame. This
 		// is genuinely global — every shader output canvas was lost.
-		this.renderer.canvas.addEventListener('webglcontextrestored', () => {
+		this._onContextRestored = () => {
 			this._glassCache.clear();
 			this._globalDirty = true;
-		});
+		};
+		this.renderer.canvas.addEventListener('webglcontextrestored', this._onContextRestored);
 
 		this._onResize = this._handleResize.bind(this);
 		this._onPointerDown = this._handlePointerDown.bind(this);
@@ -256,13 +276,16 @@ export class LiquidGlass {
 		// text with the page's actual webfont (matching glyph metrics
 		// with the live DOM under the glass).
 		await this.capture.prefetchFontEmbedCSS();
+		if (this._destroyed) return;
 
 		await this._captureGlassContent();
+		if (this._destroyed) return;
 		// Pre-warm the static-content cache so the first rendered frame
 		// has real DOM behind every glass panel — without this, the
 		// shader briefly samples an empty (white) local scene while
 		// async html-to-image captures resolve.
 		await this._prewarmStaticCaptures();
+		if (this._destroyed) return;
 
 		window.addEventListener('resize', this._onResize);
 		this.root.addEventListener('pointerdown', this._onPointerDown);
@@ -316,6 +339,9 @@ export class LiquidGlass {
 	}
 
 	destroy(): void {
+		if (this._destroyed) return;
+		this._destroyed = true;
+		this.renderer.canvas.removeEventListener('webglcontextrestored', this._onContextRestored);
 		this._running = false;
 		cancelAnimationFrame(this._rafId);
 
@@ -356,7 +382,8 @@ export class LiquidGlass {
 		document.getElementById(STYLE_ID)?.remove();
 
 		this.capture.destroy();
-		this.renderer.destroy();
+		if (this._ownsRenderer) this.renderer.destroy();
+		else this.renderer.reset();
 	}
 
 	// ────────────────────────────────────────────

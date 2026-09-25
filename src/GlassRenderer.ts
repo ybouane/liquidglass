@@ -292,6 +292,15 @@ export class GlassRenderer {
 		gl.disable(gl.SCISSOR_TEST);
 	}
 
+	/** Release scene pixels and framebuffers while retaining compiled shaders. */
+	reset(): void {
+		this.resize(0, 0);
+		if (this.bgTex) this.gl.deleteTexture(this.bgTex);
+		this.bgTex = null;
+		this.cropCanvas.width = 0;
+		this.cropCanvas.height = 0;
+	}
+
 	destroy(): void {
 		this.canvas.removeEventListener('webglcontextlost', this._onContextLost);
 		this.canvas.removeEventListener('webglcontextrestored', this._onContextRestored);
@@ -308,6 +317,7 @@ export class GlassRenderer {
 			gl.deleteProgram(this.blurP);
 			gl.deleteProgram(this.glassP);
 		}
+		if (!this.gl.isContextLost()) this.gl.getExtension('WEBGL_lose_context')?.loseContext();
 		this.canvas.remove();
 	}
 
