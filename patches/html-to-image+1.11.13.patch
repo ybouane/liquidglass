@@ -52,3 +52,39 @@ index 5dfcd11..23088c6 100644
  
        if (
          isInstanceOfElement(nativeNode, HTMLIFrameElement) &&
+diff --git a/node_modules/html-to-image/es/util.js b/node_modules/html-to-image/es/util.js
+--- a/node_modules/html-to-image/es/util.js
++++ b/node_modules/html-to-image/es/util.js
+@@ -150,7 +150,7 @@
+         const img = new Image();
+         img.onload = () => {
+             img.decode().then(() => {
+-                requestAnimationFrame(() => resolve(img));
++                resolve(img);
+             });
+         };
+         img.onerror = reject;
+diff --git a/node_modules/html-to-image/lib/util.js b/node_modules/html-to-image/lib/util.js
+--- a/node_modules/html-to-image/lib/util.js
++++ b/node_modules/html-to-image/lib/util.js
+@@ -203,7 +203,7 @@
+         var img = new Image();
+         img.onload = function () {
+             img.decode().then(function () {
+-                requestAnimationFrame(function () { return resolve(img); });
++                resolve(img);
+             });
+         };
+         img.onerror = reject;
+diff --git a/node_modules/html-to-image/src/util.ts b/node_modules/html-to-image/src/util.ts
+--- a/node_modules/html-to-image/src/util.ts
++++ b/node_modules/html-to-image/src/util.ts
+@@ -201,7 +201,7 @@
+     const img = new Image()
+     img.onload = () => {
+       img.decode().then(() => {
+-        requestAnimationFrame(() => resolve(img))
++        resolve(img)
+       })
+     }
+     img.onerror = reject

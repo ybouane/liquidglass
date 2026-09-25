@@ -163,3 +163,17 @@ test('cancelling startup cleans the scene without destroying its borrowed render
   });
   expect(result).toEqual({ error: 'AbortError', controls: 0, lost: false });
 });
+
+test('initialization paints inside a view transition while animation frames are paused', async ({ page }) => {
+  await open(page);
+  const result = await page.evaluate(async () => {
+    const transition = document.startViewTransition(async () => { await window.start(); });
+    await transition.ready;
+    const canvas = document.querySelector('search > canvas');
+    const alpha = canvas.getContext('2d').getImageData(Math.floor(canvas.width / 2), Math.floor(canvas.height / 2), 1, 1).data[3];
+    await transition.finished;
+    window.instance.destroy();
+    return alpha;
+  });
+  expect(result).toBeGreaterThan(200);
+});

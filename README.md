@@ -317,3 +317,7 @@ its observers, handlers and control canvases and releases captured GPU pixels,
 while retaining the shared context and compiled shaders. Call
 `renderer.destroy()` when the document no longer needs it. An optional
 `AbortSignal` cancels initialization and cleans up a partially created scene.
+
+Initialization paints its first frame before resolving. The html-to-image patch
+also resolves decoded images without waiting for an animation frame, so capture
+can complete inside a View Transition update callback while rendering is paused.
