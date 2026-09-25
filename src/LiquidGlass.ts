@@ -335,7 +335,9 @@ export class LiquidGlass {
 
 		this._running = true;
 		this._globalDirty = true;
-		this._rafId = requestAnimationFrame(() => this._renderLoop());
+		// Paint before init resolves, including inside a view-transition update
+		// callback where the browser may suspend animation-frame callbacks.
+		this._renderLoop();
 	}
 
 	destroy(): void {

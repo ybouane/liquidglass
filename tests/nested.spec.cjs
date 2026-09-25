@@ -132,7 +132,9 @@ test('sequential scenes reuse one context and final disposal releases it', async
       await window.start({ renderer });
       const scene = window.instance;
       if (scene.renderer.gl !== gl) throw new Error('Renderer changed');
-      await new Promise(resolve => requestAnimationFrame(resolve));
+      const canvas = document.querySelector('search > canvas');
+      const pixel = canvas.getContext('2d').getImageData(Math.floor(canvas.width / 2), Math.floor(canvas.height / 2), 1, 1).data;
+      if (!pixel[3]) throw new Error('Initialization did not paint');
       scene.destroy();
       if (document.querySelector('.glass > canvas')) throw new Error('Control canvas leaked');
       if (gl.isContextLost()) throw new Error('Borrowed renderer destroyed');
