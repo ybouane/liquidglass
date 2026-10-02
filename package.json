@@ -19,7 +19,8 @@
 	"scripts": {
 		"postinstall": "patch-package",
 		"build": "tsc && esbuild src/index.ts --bundle --format=esm --sourcemap --outfile=dist/index.js",
-		"dev": "tsc --watch"
+		"dev": "tsc --watch",
+		"test": "npm run build && playwright test --config=tests/playwright.config.cjs"
 	},
 	"keywords": [
 		"liquidglass",
@@ -34,6 +35,7 @@
 	"author": "",
 	"license": "MIT",
 	"devDependencies": {
+		"@playwright/test": "1.63.0",
 		"esbuild": "^0.28.0",
 		"html-to-image": "^1.11.11",
 		"patch-package": "^8.0.1",

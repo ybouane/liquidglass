@@ -76,8 +76,9 @@ Async — creates and starts a LiquidGlass instance. Resolves once the page's we
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `root` | `HTMLElement` | *(required)* | The container element. Glass elements must be **direct children** of this element. |
-| `glassElements` | `NodeList \| HTMLElement[]` | `[]` | Elements to apply the glass effect to. |
+| `root` | `HTMLElement` | *(required)* | The common container. Without `backdropRoot`, glass elements must be its **direct children**. |
+| `backdropRoot` | `HTMLElement` | *(optional)* | A separate descendant whose direct children provide the backdrop for nested controls. See below. |
+| `glassElements` | `NodeList \| HTMLElement[]` | `[]` | Elements to apply the glass effect to. With `backdropRoot`, list them in **back-to-front paint order**. |
 | `defaults` | `Partial<GlassConfig>` | `{}` | Override the default per-element configuration values for this instance. |
 
 **Returns** a `Promise<LiquidGlass>` resolving to the instance, which exposes:
@@ -100,6 +101,59 @@ const instance = await LiquidGlass.init({
   },
 });
 ```
+
+### Nested controls over a separate backdrop
+
+Use `backdropRoot` when semantic header/footer controls sit above a separate
+content area. Each shader canvas is inserted into the actual control; no proxy
+elements or position synchronization are needed. All controls share one renderer.
+
+```html
+<body>
+  <header><details><summary class="glass">Account</summary><p>Account menu</p></details></header>
+  <main>
+    <div class="background" aria-hidden="true"></div>
+    <ol><!-- Scrollable content --></ol>
+  </main>
+  <footer>
+    <search class="glass"><input type="search" aria-label="Search"></search>
+    <a class="glass" href="/new">New conversation</a>
+  </footer>
+</body>
+```
+
+```javascript
+const instance = await LiquidGlass.init({
+  root: document.body,
+  backdropRoot: document.querySelector('main'),
+  // Match your CSS: in this example the header paints above the footer.
+  glassElements: [
+    ...document.querySelectorAll('footer .glass'),
+    document.querySelector('summary'),
+  ],
+  defaults: { floating: false, button: false },
+});
+
+// Scroll changes which part of the backdrop is under a fixed control.
+window.addEventListener('scroll', () => instance.markChanged(), true);
+```
+
+Give each control a local stacking context (for example `isolation: isolate`) so
+its negative-z-index canvas stays behind its content, and use transparent
+backgrounds so that canvas can be seen. Keep CSS backdrop blur as the fallback
+until initialization succeeds; restore it if initialization fails or the renderer
+is destroyed. The complete example is in `tests/nested.html`.
+
+This is an explicit layered scene, not a general implementation of browser
+painting. The backdrop root must be separate from every glass element, and all
+of its layers paint behind the controls. Its own background, ancestor clipping,
+and decorations on the controls' ancestors are not captured. Supply backgrounds
+as children, and use a backdrop that covers the controls' sampling area.
+Glass elements may be nested in ordinary containers, but cannot contain each
+other. Use a container such as `search` around void/replaced controls like
+`input`, which cannot display an inserted child canvas. Text selection on the
+common root is preserved in this mode. Adding/removing controls requires
+destroying and reinitializing the instance.
 
 ## Per-Element Configuration
 
@@ -208,7 +262,7 @@ If you put an overlay above a background image and the glass shows the bg but no
 
 ### Structural
 
-- **Glass elements must be direct children of the root.** Nested glass is rejected at init with a console warning. If you need glass inside a wrapper, give the wrapper its own `LiquidGlass.init()` call.
+- **Without `backdropRoot`, glass elements must be direct children of the root.** Nested glass is skipped with a console warning. Use the explicit backdrop mode above for nested controls sharing one background.
 - **The root itself is never captured.** The shader samples the root's *children*, so any background image, padding, or border on the root is invisible to the glass effect. Put backgrounds in a sibling element *inside* the root.
 - **A `<canvas>` is injected as the glass element's first child** for shader output. Avoid `:first-child` selectors on glass elements.
 - **Multiple LiquidGlass roots cannot share refraction.** A glass element in one root cannot see what another root's glass elements are rendering — they each have their own compositing canvas.
@@ -231,11 +285,24 @@ If you put an overlay above a background image and the glass shows the bg but no
 
 - **`LiquidGlass.init()` is async.** It resolves only after the font CSS prefetch, glass content pre-capture, and static-content pre-warm have all completed (typically 100–500 ms on a fresh page).
 - **`data-dynamic` only catches direct children of the root.** Live content nested inside a wrapper that lacks `data-dynamic` will not trigger re-captures.
-- **`destroy()` does not restore an element's original `position: static`** if the library overwrote it with `relative`. Re-init on the same elements is fine; exotic external mutation in between is not.
+- **`destroy()` restores the original inline position, overflow, and touch-action of glass elements.** Avoid changing these inline properties while the instance owns them.
 
 ## Browser Support
 
 Requires WebGL 1.0 + Canvas 2D + SVG `foreignObject`. Effectively all evergreen browsers (Chrome, Firefox, Safari, Edge). WebGL context loss is recovered automatically.
+
+## Development and tests
+
+```bash
+npm ci
+npx playwright install --with-deps chromium webkit
+npm test
+```
+
+Tests build the package and use a local fixture server, with no external page or
+API dependency. Chromium and WebKit verify nested canvas placement, actual
+backdrop pixel changes on scroll, keyboard interaction, resizing, teardown and
+reinitialization, invalid layouts, and the original direct-child API.
 
 ## License
 
