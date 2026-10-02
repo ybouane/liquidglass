@@ -22,8 +22,19 @@ import { GlassRenderer } from './GlassRenderer.js';
 export interface LiquidGlassOptions {
 	/** Root container element. */
 	root: HTMLElement;
+	/**
+	 * Optional background subtree, separate from the glass controls.
+	 * Its direct children are composited behind all glass elements. When set,
+	 * glass elements may be nested anywhere else inside root; list them in
+	 * back-to-front paint order. The backdropRoot itself is not captured.
+	 */
+	backdropRoot?: HTMLElement;
 	/** Elements to apply the glass effect to. */
 	glassElements?: NodeListOf<HTMLElement> | HTMLElement[];
+	/** Caller-owned renderer, reusable across sequential scenes. Destroy it after the final scene. */
+	renderer?: GlassRenderer;
+	/** Cancel initialization and dispose the partially initialized scene. */
+	signal?: AbortSignal;
 	/** Override the default configuration values. */
 	defaults?: Partial<GlassConfig>;
 }
@@ -85,9 +96,20 @@ export class LiquidGlass {
 	// ────────────────────────────────────────────
 
 	static async init(options: LiquidGlassOptions): Promise<LiquidGlass> {
+		options.signal?.throwIfAborted();
 		const instance = new LiquidGlass(options);
-		await instance._start();
-		return instance;
+		const abort = () => instance.destroy();
+		options.signal?.addEventListener('abort', abort, { once: true });
+		try {
+			await instance._start();
+			options.signal?.throwIfAborted();
+			return instance;
+		} catch (error) {
+			instance.destroy();
+			throw error;
+		} finally {
+			options.signal?.removeEventListener('abort', abort);
+		}
 	}
 
 	// ────────────────────────────────────────────
@@ -95,6 +117,7 @@ export class LiquidGlass {
 	// ────────────────────────────────────────────
 
 	readonly root: HTMLElement;
+	readonly backdropRoot?: HTMLElement;
 	readonly defaults: GlassConfig;
 	readonly glassSet: Set<HTMLElement>;
 	readonly glassCanvases: Map<HTMLElement, HTMLCanvasElement>;
@@ -104,6 +127,9 @@ export class LiquidGlass {
 	/** Current frames-per-second (updated every frame). */
 	fps = 0;
 
+	private _destroyed = false;
+	private readonly _ownsRenderer: boolean;
+	private readonly _onContextRestored: () => void;
 	private _running = false;
 	private _rafId = 0;
 	private _hasDynamic = false;
@@ -153,6 +179,7 @@ export class LiquidGlass {
 	private readonly _glassLastSize = new Map<HTMLElement, SizeEntry>();
 	private readonly _buttonStates = new Map<HTMLElement, ButtonState>();
 	private readonly _buttonListeners = new Map<HTMLElement, Array<() => void>>();
+	private readonly _originalGlassStyles = new Map<HTMLElement, Map<string, [string, string]>>();
 	private readonly _sceneCanvas: HTMLCanvasElement;
 	private readonly _sceneCtx: CanvasRenderingContext2D;
 
@@ -174,12 +201,31 @@ export class LiquidGlass {
 	// Constructor (prefer LiquidGlass.init)
 	// ────────────────────────────────────────────
 
-	constructor({ root, glassElements, defaults = {} }: LiquidGlassOptions) {
+	constructor({ root, backdropRoot, glassElements, renderer, defaults = {} }: LiquidGlassOptions) {
 		if (!root) throw new Error('LiquidGlass: `root` element is required.');
 
 		this.root = root;
+		this.backdropRoot = backdropRoot;
 		this.defaults = { ...DEFAULTS, ...defaults };
 		this.glassSet = new Set(Array.from(glassElements || []));
+		if (backdropRoot) {
+			if (backdropRoot === root || !root.contains(backdropRoot)) {
+				throw new Error('LiquidGlass: backdropRoot must be a descendant of root.');
+			}
+			for (const el of this.glassSet) {
+				if (!root.contains(el) || el.contains(backdropRoot) || backdropRoot.contains(el)) {
+					throw new Error('LiquidGlass: glass elements must be inside root and separate from backdropRoot.');
+				}
+				if (/^(AREA|BASE|BR|COL|EMBED|HR|IMG|INPUT|LINK|META|PARAM|SOURCE|TRACK|WBR|TEXTAREA|SELECT|CANVAS|VIDEO|AUDIO|IFRAME|OBJECT)$/.test(el.tagName)) {
+					throw new Error('LiquidGlass: glass elements must support a visible child canvas; use a container around form inputs.');
+				}
+				for (const other of this.glassSet) {
+					if (el !== other && el.contains(other)) {
+						throw new Error('LiquidGlass: glass elements cannot contain other glass elements.');
+					}
+				}
+			}
+		}
 		this.glassCanvases = new Map();
 		this.capture = new HtmlCapture(root);
 		// When an async html-to-image re-capture finishes, mark only
@@ -190,17 +236,19 @@ export class LiquidGlass {
 		this.capture.onCacheUpdate = (element) => {
 			this._markGlassesIntersecting(element);
 		};
-		this.renderer = new GlassRenderer();
+		this._ownsRenderer = !renderer;
+		this.renderer = renderer ?? new GlassRenderer();
 		this._sceneCanvas = document.createElement('canvas');
 		this._sceneCtx = this._sceneCanvas.getContext('2d')!;
 
 		// When the WebGL context is restored, invalidate all caches so
 		// the render loop rebuilds everything on the next frame. This
 		// is genuinely global — every shader output canvas was lost.
-		this.renderer.canvas.addEventListener('webglcontextrestored', () => {
+		this._onContextRestored = () => {
 			this._glassCache.clear();
 			this._globalDirty = true;
-		});
+		};
+		this.renderer.canvas.addEventListener('webglcontextrestored', this._onContextRestored);
 
 		this._onResize = this._handleResize.bind(this);
 		this._onPointerDown = this._handlePointerDown.bind(this);
@@ -213,8 +261,11 @@ export class LiquidGlass {
 	// ────────────────────────────────────────────
 
 	private async _start(): Promise<void> {
-		this.root.style.userSelect = 'none';
-		(this.root.style as CSSStyleDeclaration & { webkitUserSelect?: string }).webkitUserSelect = 'none';
+		// A shared ancestor such as body also contains ordinary selectable content.
+		if (!this.backdropRoot) {
+			this.root.style.userSelect = 'none';
+			(this.root.style as CSSStyleDeclaration & { webkitUserSelect?: string }).webkitUserSelect = 'none';
+		}
 		this._setupGlassElements();
 		this._hasDynamic = this._detectDynamic();
 		this._sortedChildren = this._getSortedChildren();
@@ -225,13 +276,16 @@ export class LiquidGlass {
 		// text with the page's actual webfont (matching glyph metrics
 		// with the live DOM under the glass).
 		await this.capture.prefetchFontEmbedCSS();
+		if (this._destroyed) return;
 
 		await this._captureGlassContent();
+		if (this._destroyed) return;
 		// Pre-warm the static-content cache so the first rendered frame
 		// has real DOM behind every glass panel — without this, the
 		// shader briefly samples an empty (white) local scene while
 		// async html-to-image captures resolve.
 		await this._prewarmStaticCaptures();
+		if (this._destroyed) return;
 
 		window.addEventListener('resize', this._onResize);
 		this.root.addEventListener('pointerdown', this._onPointerDown);
@@ -245,6 +299,9 @@ export class LiquidGlass {
 			this._globalDirty = true;
 		});
 		this._observer.observe(this.root, { childList: true });
+		if (this.backdropRoot) {
+			this._observer.observe(this.backdropRoot, { childList: true });
+		}
 
 		this._glassSubtreeObserver = new MutationObserver((mutations) => {
 			for (const mutation of mutations) {
@@ -278,15 +335,22 @@ export class LiquidGlass {
 
 		this._running = true;
 		this._globalDirty = true;
-		this._rafId = requestAnimationFrame(() => this._renderLoop());
+		// Paint before init resolves, including inside a view-transition update
+		// callback where the browser may suspend animation-frame callbacks.
+		this._renderLoop();
 	}
 
 	destroy(): void {
+		if (this._destroyed) return;
+		this._destroyed = true;
+		this.renderer.canvas.removeEventListener('webglcontextrestored', this._onContextRestored);
 		this._running = false;
 		cancelAnimationFrame(this._rafId);
 
-		this.root.style.removeProperty('user-select');
-		this.root.style.removeProperty('-webkit-user-select');
+		if (!this.backdropRoot) {
+			this.root.style.removeProperty('user-select');
+			this.root.style.removeProperty('-webkit-user-select');
+		}
 
 		window.removeEventListener('resize', this._onResize);
 		this.root.removeEventListener('pointerdown', this._onPointerDown);
@@ -300,12 +364,13 @@ export class LiquidGlass {
 
 		for (const [el, canvas] of this.glassCanvases) {
 			canvas.remove();
-			el.style.removeProperty('position');
-			el.style.removeProperty('overflow');
-			el.style.removeProperty('touch-action');
+			for (const [property, [value, priority]] of this._originalGlassStyles.get(el) || []) {
+				el.style.setProperty(property, value, priority);
+			}
 			el.classList.remove(BUTTON_CLASS);
 		}
 		this.glassCanvases.clear();
+		this._originalGlassStyles.clear();
 		this._glassCache.clear();
 		this._glassContentImages.clear();
 		this._glassLastSize.clear();
@@ -319,7 +384,8 @@ export class LiquidGlass {
 		document.getElementById(STYLE_ID)?.remove();
 
 		this.capture.destroy();
-		this.renderer.destroy();
+		if (this._ownsRenderer) this.renderer.destroy();
+		else this.renderer.reset();
 	}
 
 	// ────────────────────────────────────────────
@@ -330,12 +396,17 @@ export class LiquidGlass {
 		let needsButtonStyles = false;
 
 		for (const el of this.glassSet) {
-			// Glass elements must be direct children of the root.
-			if (el.parentElement !== this.root) {
+			// The original scene mode orders direct children automatically.
+			if (!this.backdropRoot && el.parentElement !== this.root) {
 				console.warn('LiquidGlass: glass element must be a direct child of root, skipping.', el);
 				this.glassSet.delete(el);
 				continue;
 			}
+			this._originalGlassStyles.set(el, new Map(
+				['position', 'overflow', 'touch-action'].map(property => [
+					property, [el.style.getPropertyValue(property), el.style.getPropertyPriority(property)],
+				]),
+			));
 
 			const currentPosition = window.getComputedStyle(el).position;
 			if (currentPosition === 'static') {
@@ -359,6 +430,7 @@ export class LiquidGlass {
 			}
 
 			const canvas = document.createElement('canvas');
+			canvas.setAttribute('aria-hidden', 'true');
 			canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:-1;';
 			el.insertBefore(canvas, el.firstChild);
 
@@ -589,8 +661,9 @@ export class LiquidGlass {
 	// ────────────────────────────────────────────
 
 	private _getSortedChildren(): HTMLElement[] {
-		const children = Array.from(this.root.children) as HTMLElement[];
-		const rootDisplay = window.getComputedStyle(this.root).display;
+		const source = this.backdropRoot || this.root;
+		const children = Array.from(source.children) as HTMLElement[];
+		const rootDisplay = window.getComputedStyle(source).display;
 		const isFlexOrGridParent =
 			rootDisplay === 'flex' || rootDisplay === 'inline-flex' ||
 			rootDisplay === 'grid' || rootDisplay === 'inline-grid';
@@ -613,7 +686,10 @@ export class LiquidGlass {
 			return a.domIndex - b.domIndex;
 		});
 
-		return tagged.map(t => t.el);
+		const layers = tagged.map(t => t.el);
+		// Explicit backdrop mode does not infer stacking across ancestor contexts.
+		// The caller supplies the glass paint order after the background layers.
+		return this.backdropRoot ? [...layers, ...this.glassSet] : layers;
 	}
 
 	/**
@@ -947,8 +1023,9 @@ export class LiquidGlass {
 		}
 
 		if (this._checkGlassSizeChanges()) {
-			// _checkGlassSizeChanges already added the resized
-			// elements to _glassDirty per-element; nothing more to do.
+			// Resizing clears the output canvas. Repaint it and any glass
+			// that sampled its previous bounds, including after a shrink.
+			this._globalDirty = true;
 		}
 
 		if (this._glassContentDirty.size > 0 && !this._capturingGlassContent) {
