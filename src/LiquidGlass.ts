@@ -13,7 +13,7 @@
  *   LiquidGlass.init({ root, glassElements });
  */
 
-import { DEFAULTS, SHADOW_PAD } from './defaults.js';
+import { BLUR_ITERATIONS, DEFAULTS, SHADOW_PAD } from './defaults.js';
 import type { GlassConfig } from './defaults.js';
 import { HtmlCapture } from './HtmlCapture.js';
 import { GlassRenderer } from './GlassRenderer.js';
@@ -79,6 +79,22 @@ interface ButtonState {
 	pressed: boolean;
 }
 
+interface PerformanceProfile {
+	effectiveDpr: number;
+	blurDownsample: number;
+	blurIterations: number;
+}
+
+interface FrameCacheState {
+	rootRect: DOMRect | null;
+	dpr: number;
+}
+
+interface MediaStyleCacheEntry {
+	objectFit: string;
+	objectPosition: string;
+}
+
 export class LiquidGlass {
 	// ────────────────────────────────────────────
 	// Static entry point
@@ -98,6 +114,7 @@ export class LiquidGlass {
 	readonly defaults: GlassConfig;
 	readonly glassSet: Set<HTMLElement>;
 	readonly glassCanvases: Map<HTMLElement, HTMLCanvasElement>;
+	readonly glassContexts: Map<HTMLElement, CanvasRenderingContext2D>;
 	readonly capture: HtmlCapture;
 	readonly renderer: GlassRenderer;
 
@@ -143,9 +160,15 @@ export class LiquidGlass {
 	private readonly _glassContentDirty = new Set<HTMLElement>();
 	private _fpsFrames = 0;
 	private _fpsTime = 0;
+	private _performanceProfile: PerformanceProfile = {
+		effectiveDpr: 1,
+		blurDownsample: 1,
+		blurIterations: BLUR_ITERATIONS,
+	};
 
 	private _observer: MutationObserver | null = null;
 	private _glassSubtreeObserver: MutationObserver | null = null;
+	private _resizeObserver: ResizeObserver | null = null;
 
 	private _sortedChildren: HTMLElement[] = [];
 	private readonly _glassCache = new Map<HTMLElement, GlassCacheEntry>();
@@ -155,6 +178,18 @@ export class LiquidGlass {
 	private readonly _buttonListeners = new Map<HTMLElement, Array<() => void>>();
 	private readonly _sceneCanvas: HTMLCanvasElement;
 	private readonly _sceneCtx: CanvasRenderingContext2D;
+	private readonly _glassCanvasSet = new Set<HTMLCanvasElement>();
+	private readonly _frameCache: FrameCacheState = {
+		rootRect: null,
+		dpr: 1,
+	};
+	private readonly _frameRectCache = new Map<HTMLElement, DOMRect>();
+	private readonly _framePixelRectCache = new Map<HTMLElement, Map<number, SampleRect>>();
+	private readonly _framePaintPadCache = new Map<HTMLElement, number>();
+	private readonly _frameDynamicDescendantsCache = new Map<HTMLElement, HTMLElement[]>();
+	private readonly _frameDynamicContentCache = new Map<HTMLElement, boolean>();
+	private readonly _frameMediaDescendantsCache = new Map<HTMLElement, HTMLElement[]>();
+	private readonly _frameMediaStyleCache = new Map<HTMLElement, MediaStyleCacheEntry>();
 
 	private readonly _drag: DragState = {
 		active: false,
@@ -181,6 +216,7 @@ export class LiquidGlass {
 		this.defaults = { ...DEFAULTS, ...defaults };
 		this.glassSet = new Set(Array.from(glassElements || []));
 		this.glassCanvases = new Map();
+		this.glassContexts = new Map();
 		this.capture = new HtmlCapture(root);
 		// When an async html-to-image re-capture finishes, mark only
 		// the glasses whose sample rect intersects that element's
@@ -200,6 +236,7 @@ export class LiquidGlass {
 		this.renderer.canvas.addEventListener('webglcontextrestored', () => {
 			this._glassCache.clear();
 			this._globalDirty = true;
+			this._scheduleRender();
 		});
 
 		this._onResize = this._handleResize.bind(this);
@@ -237,12 +274,15 @@ export class LiquidGlass {
 		this.root.addEventListener('pointerdown', this._onPointerDown);
 		window.addEventListener('pointermove', this._onPointerMove);
 		window.addEventListener('pointerup', this._onPointerUp);
+		this._observeResizes();
 
 		this._observer = new MutationObserver(() => {
 			// Structural mutation: painting order may have shifted,
 			// every glass needs to re-render.
 			this._sortedChildren = this._getSortedChildren();
+			this._hasDynamic = this._detectDynamic();
 			this._globalDirty = true;
+			this._scheduleRender();
 		});
 		this._observer.observe(this.root, { childList: true });
 
@@ -278,7 +318,7 @@ export class LiquidGlass {
 
 		this._running = true;
 		this._globalDirty = true;
-		this._rafId = requestAnimationFrame(() => this._renderLoop());
+		this._scheduleRender();
 	}
 
 	destroy(): void {
@@ -297,6 +337,8 @@ export class LiquidGlass {
 		this._observer = null;
 		this._glassSubtreeObserver?.disconnect();
 		this._glassSubtreeObserver = null;
+		this._resizeObserver?.disconnect();
+		this._resizeObserver = null;
 
 		for (const [el, canvas] of this.glassCanvases) {
 			canvas.remove();
@@ -306,6 +348,8 @@ export class LiquidGlass {
 			el.classList.remove(BUTTON_CLASS);
 		}
 		this.glassCanvases.clear();
+		this.glassContexts.clear();
+		this._glassCanvasSet.clear();
 		this._glassCache.clear();
 		this._glassContentImages.clear();
 		this._glassLastSize.clear();
@@ -363,6 +407,8 @@ export class LiquidGlass {
 			el.insertBefore(canvas, el.firstChild);
 
 			this.glassCanvases.set(el, canvas);
+			this.glassContexts.set(el, canvas.getContext('2d')!);
+			this._glassCanvasSet.add(canvas);
 		}
 
 		// Inject button styles once if any glass element uses button mode
@@ -418,7 +464,7 @@ export class LiquidGlass {
 		//    They read element via _composeSceneForGlass (either as a
 		//    non-glass contributor or via _drawPriorGlassToScene).
 		const rootRect = this.root.getBoundingClientRect();
-		const dpr = window.devicePixelRatio || 1;
+		const dpr = this._getEffectiveDpr();
 		const elementDOMRect = rectOverride ?? element.getBoundingClientRect();
 		// Pad by SHADOW_PAD when the element itself is a glass — its
 		// rendered output extends that far past its CSS box. For non-
@@ -444,6 +490,7 @@ export class LiquidGlass {
 				this._glassDirty.add(child);
 			}
 		}
+		this._scheduleRender();
 	}
 
 	/**
@@ -456,7 +503,7 @@ export class LiquidGlass {
 	 */
 	private _markGlassesIntersecting(element: HTMLElement): void {
 		const rootRect = this.root.getBoundingClientRect();
-		const dpr = window.devicePixelRatio || 1;
+		const dpr = this._getEffectiveDpr();
 		const elementBox = this._getPixelRect(
 			element.getBoundingClientRect(), rootRect, dpr,
 			this.glassSet.has(element) ? SHADOW_PAD : 0,
@@ -469,6 +516,7 @@ export class LiquidGlass {
 				this._glassDirty.add(glass);
 			}
 		}
+		this._scheduleRender();
 	}
 
 	/**
@@ -490,9 +538,11 @@ export class LiquidGlass {
 	markChanged(element?: HTMLElement): void {
 		if (!element) {
 			this._globalDirty = true;
+			this._scheduleRender();
 			return;
 		}
 		this._userMarkedChanged.add(element);
+		this._scheduleRender();
 	}
 
 	private _setupButtonListeners(el: HTMLElement): void {
@@ -556,6 +606,7 @@ export class LiquidGlass {
 				);
 				if (img) {
 					this._glassContentImages.set(el, img);
+					this._markGlassAndDependents(el);
 				}
 			}
 		} finally {
@@ -734,7 +785,8 @@ export class LiquidGlass {
 	// ────────────────────────────────────────────
 
 	private _handleResize(): void {
-		const dpr = window.devicePixelRatio || 1;
+		this._performanceProfile = this._resolvePerformanceProfile();
+		const dpr = this._performanceProfile.effectiveDpr;
 		const rect = this.root.getBoundingClientRect();
 
 		this.capture.resize(dpr);
@@ -749,12 +801,13 @@ export class LiquidGlass {
 		// (both content image and shader output).
 		for (const el of this.glassSet) this._glassContentDirty.add(el);
 		this._globalDirty = true;
+		this._scheduleRender();
 	}
 
 	private _updateGlassCanvasSize(el: HTMLElement): void {
 		const canvas = this.glassCanvases.get(el);
 		if (!canvas) return;
-		const dpr = window.devicePixelRatio || 1;
+		const dpr = this._getEffectiveDpr();
 		// Use offsetWidth/Height — the CSS box size before transforms.
 		// This prevents button hover scale from inflating the canvas.
 		const elW = Math.round(el.offsetWidth);
@@ -794,10 +847,53 @@ export class LiquidGlass {
 				// Only this element's content image needs to be
 				// re-captured, not every glass on the page.
 				this._glassContentDirty.add(el);
+				this._markGlassAndDependents(el);
 				changed = true;
 			}
 		}
 		return changed;
+	}
+
+	private _observeResizes(): void {
+		if (typeof ResizeObserver === 'undefined') return;
+		this._resizeObserver?.disconnect();
+		this._resizeObserver = new ResizeObserver((entries) => {
+			let rootChanged = false;
+			for (const entry of entries) {
+				const target = entry.target as HTMLElement;
+				if (target === this.root) {
+					rootChanged = true;
+					continue;
+				}
+				if (!this.glassSet.has(target)) continue;
+				this._handleObservedGlassResize(target);
+			}
+			if (rootChanged) {
+				this._handleResize();
+			}
+		});
+		this._resizeObserver.observe(this.root);
+		for (const el of this.glassSet) {
+			this._resizeObserver.observe(el);
+		}
+	}
+
+	private _handleObservedGlassResize(el: HTMLElement): void {
+		const w = el.offsetWidth;
+		const h = el.offsetHeight;
+		const last = this._glassLastSize.get(el);
+		if (last
+			&& Math.abs(last.w - w) <= 0.5
+			&& Math.abs(last.h - h) <= 0.5
+		) {
+			return;
+		}
+
+		this._updateGlassCanvasSize(el);
+		this._glassCache.delete(el);
+		this.capture.invalidateCache(el);
+		this._glassContentDirty.add(el);
+		this._markGlassAndDependents(el);
 	}
 
 	// ────────────────────────────────────────────
@@ -935,6 +1031,7 @@ export class LiquidGlass {
 	// ────────────────────────────────────────────
 
 	private _renderLoop(): void {
+		this._rafId = 0;
 		if (!this._running) return;
 
 		// FPS tracking
@@ -946,7 +1043,7 @@ export class LiquidGlass {
 			this._fpsTime = now;
 		}
 
-		if (this._checkGlassSizeChanges()) {
+		if (!this._resizeObserver && this._checkGlassSizeChanges()) {
 			// _checkGlassSizeChanges already added the resized
 			// elements to _glassDirty per-element; nothing more to do.
 		}
@@ -966,56 +1063,62 @@ export class LiquidGlass {
 			console.error('LiquidGlass: render error:', err);
 		}
 
-		this._rafId = requestAnimationFrame(() => this._renderLoop());
+		if (this._shouldKeepRendering()) {
+			this._scheduleRender();
+		}
 	}
 
 	private _renderFrame(): void {
-		const dpr = window.devicePixelRatio || 1;
+		const dpr = this._getEffectiveDpr();
 		const rootRect = this.root.getBoundingClientRect();
 		const isDragging = this._drag.active;
-
-		// 1. Fan out user markChanged() calls into per-glass dirty marks.
-		if (this._userMarkedChanged.size > 0) {
-			for (const el of this._userMarkedChanged) {
-				this._markGlassesIntersecting(el);
+		this._beginFrameCache(rootRect, dpr);
+		try {
+			// 1. Fan out user markChanged() calls into per-glass dirty marks.
+			if (this._userMarkedChanged.size > 0) {
+				for (const el of this._userMarkedChanged) {
+					this._markGlassesIntersecting(el);
+				}
+				this._userMarkedChanged.clear();
 			}
-			this._userMarkedChanged.clear();
-		}
 
-		// 2. Promote any global dirty into per-element dirties so the
-		//    rest of the loop only ever consults `_glassDirty`.
-		if (this._globalDirty) {
-			for (const el of this.glassSet) this._glassDirty.add(el);
-			this._globalDirty = false;
-		}
+			// 2. Promote any global dirty into per-element dirties so the
+			//    rest of the loop only ever consults `_glassDirty`.
+			if (this._globalDirty) {
+				for (const el of this.glassSet) this._glassDirty.add(el);
+				this._globalDirty = false;
+			}
 
-		const needsRender = this._glassDirty.size > 0
-			|| this._hasDynamic
-			|| isDragging;
-		if (!needsRender) return;
+			const needsRender = this._glassDirty.size > 0
+				|| this._hasDynamic
+				|| isDragging;
+			if (!needsRender) return;
 
-		// 3. Snapshot + drain the dirty set so anything added during
-		//    this frame's work (e.g. async cache landings) is picked
-		//    up on the next frame instead of getting clobbered.
-		const dirtyTargets = new Set(this._glassDirty);
-		this._glassDirty.clear();
+			// 3. Snapshot + drain the dirty set so anything added during
+			//    this frame's work (e.g. async cache landings) is picked
+			//    up on the next frame instead of getting clobbered.
+			const dirtyTargets = new Set(this._glassDirty);
+			this._glassDirty.clear();
 
-		// 4. Track which glass elements actually re-rendered this
-		//    frame, with their sample rect, so later glasses in the
-		//    z-order can detect "a prior glass that I overlap just
-		//    re-rendered → I need to refresh too."
-		const renderedThisFrame: Array<{ rect: SampleRect }> = [];
+			// 4. Track which glass elements actually re-rendered this
+			//    frame, with their sample rect, so later glasses in the
+			//    z-order can detect "a prior glass that I overlap just
+			//    re-rendered → I need to refresh too."
+			const renderedThisFrame: Array<{ rect: SampleRect }> = [];
 
-		for (const child of this._sortedChildren) {
-			if (!this.glassSet.has(child)) continue;
-			this._renderGlassElement(
-				child,
-				rootRect,
-				dpr,
-				isDragging,
-				dirtyTargets,
-				renderedThisFrame,
-			);
+			for (const child of this._sortedChildren) {
+				if (!this.glassSet.has(child)) continue;
+				this._renderGlassElement(
+					child,
+					rootRect,
+					dpr,
+					isDragging,
+					dirtyTargets,
+					renderedThisFrame,
+				);
+			}
+		} finally {
+			this._clearFrameCache();
 		}
 	}
 
@@ -1044,14 +1147,14 @@ export class LiquidGlass {
 		renderedThisFrame: Array<{ rect: SampleRect }>,
 	): void {
 		const config = this._getConfig(child);
-		const elRect = child.getBoundingClientRect();
+		const elRect = this._getElementRect(child, rootRect, dpr);
 		const elW = child.offsetWidth;
 		const elH = child.offsetHeight;
 		const centerX = (elRect.left - rootRect.left) + elRect.width / 2;
 		const centerY = (elRect.top - rootRect.top) + elRect.height / 2;
 		const glassCanvas = this.glassCanvases.get(child);
 		const isBeingDragged = isDragging && this._drag.element === child;
-		const sampleRect = this._getPixelRect(elRect, rootRect, dpr, SHADOW_PAD);
+		const sampleRect = this._getElementPixelRect(child, rootRect, dpr, SHADOW_PAD);
 
 		const cached = this._glassCache.get(child);
 		const posChanged = !cached
@@ -1096,6 +1199,8 @@ export class LiquidGlass {
 				renderW,
 				renderH,
 				config.blurAmount,
+				this._performanceProfile.blurDownsample,
+				this._performanceProfile.blurIterations,
 			);
 			this.renderer.clear();
 			this.renderer.renderGlassPanel(
@@ -1105,7 +1210,8 @@ export class LiquidGlass {
 				dpr,
 			);
 
-			const ctx = glassCanvas.getContext('2d')!;
+			const ctx = this.glassContexts.get(child);
+			if (!ctx) return;
 			ctx.clearRect(0, 0, glassCanvas.width, glassCanvas.height);
 			ctx.drawImage(
 				this.renderer.canvas,
@@ -1159,12 +1265,12 @@ export class LiquidGlass {
 	): boolean {
 		// A glass element marked data-dynamic on its own root counts
 		// as always-dirty: forces every-frame shader re-runs.
-		if (this._childHasDynamicContent(currentGlass)) return true;
+		if (this._childHasDynamicContent(currentGlass, rootRect, dpr)) return true;
 
 		for (const child of this._sortedChildren) {
 			if (child === currentGlass) break;
 			if (this.glassSet.has(child)) continue;
-			if (!this._childHasDynamicContent(child)) continue;
+			if (!this._childHasDynamicContent(child, rootRect, dpr)) continue;
 			if (this._childTouchesSample(child, sampleRect, rootRect, dpr)) {
 				return true;
 			}
@@ -1172,10 +1278,25 @@ export class LiquidGlass {
 		return false;
 	}
 
-	private _childHasDynamicContent(child: HTMLElement): boolean {
-		if (child.hasAttribute('data-dynamic')) return true;
-		if (child.tagName === 'VIDEO') return true;
-		return child.querySelector('[data-dynamic], video') !== null;
+	private _childHasDynamicContent(
+		child: HTMLElement,
+		rootRect: DOMRect,
+		dpr: number,
+	): boolean {
+		if (this._isFrameCacheActive(rootRect, dpr)) {
+			const cached = this._frameDynamicContentCache.get(child);
+			if (cached !== undefined) return cached;
+		}
+
+		const hasDynamic = child.hasAttribute('data-dynamic')
+			|| child.tagName === 'VIDEO'
+			|| this._getDynamicDescendants(child, rootRect, dpr).length > 0;
+
+		if (this._isFrameCacheActive(rootRect, dpr)) {
+			this._frameDynamicContentCache.set(child, hasDynamic);
+		}
+
+		return hasDynamic;
 	}
 
 	private _drawNonGlassChildToScene(
@@ -1217,7 +1338,7 @@ export class LiquidGlass {
 		// per element regardless of how many glasses overlap it.
 		const isDynamic = child.hasAttribute('data-dynamic');
 		this.capture.captureElement(child, isDynamic);
-		const rect = this._getPixelRect(child.getBoundingClientRect(), rootRect, dpr);
+		const rect = this._getElementPixelRect(child, rootRect, dpr);
 		this.capture.drawCachedElement(
 			child,
 			this._sceneCtx,
@@ -1243,16 +1364,7 @@ export class LiquidGlass {
 		rootRect: DOMRect,
 		dpr: number,
 	): void {
-		const mediaEls = parent.querySelectorAll('img, video, canvas');
-		for (const el of mediaEls) {
-			const htmlEl = el as HTMLElement;
-			// Skip the injected glass shader canvases
-			let isGlassCanvas = false;
-			for (const [, gc] of this.glassCanvases) {
-				if (gc === el) { isGlassCanvas = true; break; }
-			}
-			if (isGlassCanvas) continue;
-
+		for (const htmlEl of this._getMediaDescendants(parent, rootRect, dpr)) {
 			this._drawMediaElement(htmlEl, targetCtx, sampleRect, rootRect, dpr);
 		}
 	}
@@ -1266,9 +1378,9 @@ export class LiquidGlass {
 		dpr: number,
 	): boolean {
 		const tag = el.tagName;
-		const r = el.getBoundingClientRect();
+		const r = this._getElementRect(el, rootRect, dpr);
 		if (!this._elementTouchesSample(el, sampleRect, rootRect, dpr)) return false;
-		const rect = this._getPixelRect(r, rootRect, dpr);
+		const rect = this._getElementPixelRect(el, rootRect, dpr);
 		const dx = rect.x - sampleRect.x;
 		const dy = rect.y - sampleRect.y;
 		const dw = rect.w;
@@ -1345,9 +1457,7 @@ export class LiquidGlass {
 		dh: number,
 	): void {
 		if (natW && natH) {
-			const computed = getComputedStyle(child);
-			const fit = computed.objectFit || 'fill';
-			const pos = computed.objectPosition || '50% 50%';
+			const { objectFit: fit, objectPosition: pos } = this._getMediaStyle(child);
 			const src = LiquidGlass._objectFitRect(natW, natH, r.width, r.height, fit, pos);
 			targetCtx.drawImage(mediaEl, src.sx, src.sy, src.sw, src.sh, dx, dy, dw, dh);
 		} else {
@@ -1362,9 +1472,8 @@ export class LiquidGlass {
 		dpr: number,
 	): void {
 		const glassCanvas = this.glassCanvases.get(child);
-		const elRect = child.getBoundingClientRect();
 		if (glassCanvas) {
-			const shaderRect = this._getPixelRect(elRect, rootRect, dpr, SHADOW_PAD);
+			const shaderRect = this._getElementPixelRect(child, rootRect, dpr, SHADOW_PAD);
 			if (LiquidGlass._rectsIntersect(shaderRect, sampleRect)) {
 				this._sceneCtx.drawImage(
 					glassCanvas,
@@ -1382,7 +1491,7 @@ export class LiquidGlass {
 
 		const contentImg = this._glassContentImages.get(child);
 		if (!contentImg) return;
-		const contentRect = this._getPixelRect(elRect, rootRect, dpr);
+		const contentRect = this._getElementPixelRect(child, rootRect, dpr);
 		if (!LiquidGlass._rectsIntersect(contentRect, sampleRect)) return;
 		this._sceneCtx.drawImage(
 			contentImg,
@@ -1415,8 +1524,8 @@ export class LiquidGlass {
 	): boolean {
 		if (this._elementTouchesSample(child, sampleRect, rootRect, dpr)) return true;
 
-		for (const el of child.querySelectorAll('[data-dynamic], video')) {
-			if (this._elementTouchesSample(el as HTMLElement, sampleRect, rootRect, dpr)) {
+		for (const el of this._getDynamicDescendants(child, rootRect, dpr)) {
+			if (this._elementTouchesSample(el, sampleRect, rootRect, dpr)) {
 				return true;
 			}
 		}
@@ -1429,13 +1538,21 @@ export class LiquidGlass {
 		rootRect: DOMRect,
 		dpr: number,
 	): boolean {
-		const pad = this._getPaintOverflowPad(element);
-		const bounds = this._getPixelRect(element.getBoundingClientRect(), rootRect, dpr, pad);
+		const pad = this._getPaintOverflowPad(element, rootRect, dpr);
+		const bounds = this._getElementPixelRect(element, rootRect, dpr, pad);
 		return LiquidGlass._rectsIntersect(bounds, sampleRect);
 	}
 
-	private _getPaintOverflowPad(element: HTMLElement): number {
+	private _getPaintOverflowPad(
+		element: HTMLElement,
+		rootRect?: DOMRect,
+		dpr?: number,
+	): number {
 		if (this.glassSet.has(element)) return SHADOW_PAD;
+		if (rootRect && dpr !== undefined && this._isFrameCacheActive(rootRect, dpr)) {
+			const cached = this._framePaintPadCache.get(element);
+			if (cached !== undefined) return cached;
+		}
 
 		const style = getComputedStyle(element);
 		const backdropFilter = style.backdropFilter
@@ -1451,7 +1568,135 @@ export class LiquidGlass {
 			|| (maskImage && maskImage !== 'none')
 			|| (style.mixBlendMode && style.mixBlendMode !== 'normal');
 
-		return paintsOutsideBounds ? SHADOW_PAD : 0;
+		const pad = paintsOutsideBounds ? SHADOW_PAD : 0;
+		if (rootRect && dpr !== undefined && this._isFrameCacheActive(rootRect, dpr)) {
+			this._framePaintPadCache.set(element, pad);
+		}
+		return pad;
+	}
+
+	private _beginFrameCache(rootRect: DOMRect, dpr: number): void {
+		this._frameCache.rootRect = rootRect;
+		this._frameCache.dpr = dpr;
+		this._frameRectCache.clear();
+		this._framePixelRectCache.clear();
+		this._framePaintPadCache.clear();
+		this._frameDynamicDescendantsCache.clear();
+		this._frameDynamicContentCache.clear();
+		this._frameMediaDescendantsCache.clear();
+		this._frameMediaStyleCache.clear();
+	}
+
+	private _clearFrameCache(): void {
+		this._frameCache.rootRect = null;
+		this._frameRectCache.clear();
+		this._framePixelRectCache.clear();
+		this._framePaintPadCache.clear();
+		this._frameDynamicDescendantsCache.clear();
+		this._frameDynamicContentCache.clear();
+		this._frameMediaDescendantsCache.clear();
+		this._frameMediaStyleCache.clear();
+	}
+
+	private _isFrameCacheActive(rootRect: DOMRect, dpr: number): boolean {
+		return this._frameCache.rootRect === rootRect
+			&& this._frameCache.dpr === dpr;
+	}
+
+	private _getElementRect(
+		element: HTMLElement,
+		rootRect: DOMRect,
+		dpr: number,
+	): DOMRect {
+		if (this._isFrameCacheActive(rootRect, dpr)) {
+			const cached = this._frameRectCache.get(element);
+			if (cached) return cached;
+		}
+
+		const rect = element.getBoundingClientRect();
+		if (this._isFrameCacheActive(rootRect, dpr)) {
+			this._frameRectCache.set(element, rect);
+		}
+		return rect;
+	}
+
+	private _getElementPixelRect(
+		element: HTMLElement,
+		rootRect: DOMRect,
+		dpr: number,
+		pad = 0,
+	): SampleRect {
+		if (this._isFrameCacheActive(rootRect, dpr)) {
+			const byPad = this._framePixelRectCache.get(element);
+			const cached = byPad?.get(pad);
+			if (cached) return cached;
+		}
+
+		const rect = this._getElementRect(element, rootRect, dpr);
+		const pixelRect = this._getPixelRect(rect, rootRect, dpr, pad);
+		if (this._isFrameCacheActive(rootRect, dpr)) {
+			let byPad = this._framePixelRectCache.get(element);
+			if (!byPad) {
+				byPad = new Map();
+				this._framePixelRectCache.set(element, byPad);
+			}
+			byPad.set(pad, pixelRect);
+		}
+		return pixelRect;
+	}
+
+	private _getDynamicDescendants(
+		element: HTMLElement,
+		rootRect: DOMRect,
+		dpr: number,
+	): HTMLElement[] {
+		if (this._isFrameCacheActive(rootRect, dpr)) {
+			const cached = this._frameDynamicDescendantsCache.get(element);
+			if (cached) return cached;
+		}
+
+		const descendants = Array.from(
+			element.querySelectorAll('[data-dynamic], video'),
+		) as HTMLElement[];
+
+		if (this._isFrameCacheActive(rootRect, dpr)) {
+			this._frameDynamicDescendantsCache.set(element, descendants);
+		}
+		return descendants;
+	}
+
+	private _getMediaDescendants(
+		element: HTMLElement,
+		rootRect: DOMRect,
+		dpr: number,
+	): HTMLElement[] {
+		if (this._isFrameCacheActive(rootRect, dpr)) {
+			const cached = this._frameMediaDescendantsCache.get(element);
+			if (cached) return cached;
+		}
+
+		const media = Array.from(
+			element.querySelectorAll('img, video, canvas'),
+		)
+			.filter((node) => !this._glassCanvasSet.has(node as HTMLCanvasElement)) as HTMLElement[];
+
+		if (this._isFrameCacheActive(rootRect, dpr)) {
+			this._frameMediaDescendantsCache.set(element, media);
+		}
+		return media;
+	}
+
+	private _getMediaStyle(element: HTMLElement): MediaStyleCacheEntry {
+		const cached = this._frameMediaStyleCache.get(element);
+		if (cached) return cached;
+
+		const computed = getComputedStyle(element);
+		const entry: MediaStyleCacheEntry = {
+			objectFit: computed.objectFit || 'fill',
+			objectPosition: computed.objectPosition || '50% 50%',
+		};
+		this._frameMediaStyleCache.set(element, entry);
+		return entry;
 	}
 
 	private static _rectsIntersect(a: SampleRect, b: SampleRect): boolean {
@@ -1459,6 +1704,47 @@ export class LiquidGlass {
 			&& a.x + a.w > b.x
 			&& a.y < b.y + b.h
 			&& a.y + a.h > b.y;
+	}
+
+	private _scheduleRender(): void {
+		if (!this._running || this._rafId) return;
+		this._rafId = requestAnimationFrame(() => this._renderLoop());
+	}
+
+	private _shouldKeepRendering(): boolean {
+		return this._drag.active
+			|| this._hasDynamic
+			|| this._globalDirty
+			|| this._glassDirty.size > 0
+			|| this._userMarkedChanged.size > 0
+			|| this._glassContentDirty.size > 0;
+	}
+
+	private _getEffectiveDpr(): number {
+		return this._performanceProfile.effectiveDpr || 1;
+	}
+
+	private _resolvePerformanceProfile(): PerformanceProfile {
+		const rawDpr = window.devicePixelRatio || 1;
+		const nav = navigator as Navigator & {
+			deviceMemory?: number;
+			connection?: { saveData?: boolean };
+		};
+		const coarsePointer = typeof window.matchMedia === 'function'
+			&& window.matchMedia('(pointer: coarse)').matches;
+		const narrowViewport = Math.min(window.innerWidth, window.innerHeight) <= 900;
+		const lowCpu = typeof nav.hardwareConcurrency === 'number'
+			&& nav.hardwareConcurrency <= 4;
+		const lowMemory = typeof nav.deviceMemory === 'number'
+			&& nav.deviceMemory <= 4;
+		const saveData = !!nav.connection?.saveData;
+		const shouldOptimize = coarsePointer || saveData || (narrowViewport && (lowCpu || lowMemory));
+
+		return {
+			effectiveDpr: shouldOptimize ? Math.min(rawDpr, 1.5) : rawDpr,
+			blurDownsample: shouldOptimize ? 0.5 : 1,
+			blurIterations: shouldOptimize ? Math.max(2, BLUR_ITERATIONS - 2) : BLUR_ITERATIONS,
+		};
 	}
 
 	/** Compute the source rectangle for drawImage that replicates CSS object-fit / object-position. */
